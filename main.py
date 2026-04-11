@@ -6,7 +6,7 @@ from telegram.ext import (
 )
 from database.database import init_db, upsert_user, log_member, get_file_id, save_file_id
 
-TOKEN = "8609131464:AAGK5k1jkLJvY1OSvHcR3YPnwqEqOFeWuAs"
+TOKEN = "8416778114:AAGV9crEJYWDzMu1O3Ve2WH4lGrvc-MRkEU"
 
 # ── Étapes ──────────────────────────────────────────────────────────────────
 PRENOM, LEVEL, OBJECTIF, WHATSAPP, EMAIL, CONFIRMATION = range(6)
