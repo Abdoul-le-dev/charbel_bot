@@ -6,7 +6,7 @@ from telegram.ext import (
 )
 from database.database import init_db, upsert_user, log_member, get_file_id, save_file_id
 
-TOKEN = "8416778114:AAGV9crEJYWDzMu1O3Ve2WH4lGrvc-MRkEU"
+TOKEN = "8609131464:AAGK5k1jkLJvY1OSvHcR3YPnwqEqOFeWuAs"
 
 # ── Étapes ──────────────────────────────────────────────────────────────────
 PRENOM, LEVEL, OBJECTIF, WHATSAPP, EMAIL, CONFIRMATION = range(6)
@@ -107,8 +107,8 @@ async def je_me_enregistre(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """/JeMEnregistre → démarre le formulaire"""
     await update.message.reply_text(
     "Super ! 🎉\n\n"
-    "Moi c’est Charbel Yayi 👋"
-    "Et toi ? \n\n",
+    "Moi c’est Charbel Yayi 👋 "
+    "et toi ? \n\n",
     parse_mode="Markdown"
     )
     return PRENOM
@@ -160,15 +160,13 @@ async def get_objectif(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "obj_methode":   "Apprendre une méthode simple et rapide",
         "obj_demo":      "Voir une démonstration en direct",
         "obj_confiance": "Gagner en confiance",
-        "obj_autre":     "Autre",
     }
     objectif = obj_map.get(query.data, "Non précisé")
     context.user_data["objectif"] = objectif
     upsert_user(user_id, objectif=objectif)
 
     await query.message.reply_text(
-        "📱 *Quel est ton numéro WhatsApp ?*\n\n"
-        "ex : +229 60619292",
+        "📱 *Quel est ton numéro(ex : +229 60619292) WhatsApp ?*\n\n",
         parse_mode="Markdown"
     )
     return WHATSAPP
