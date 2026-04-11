@@ -44,10 +44,11 @@ def kb_confirmation():
 async def send_welcome_video(bot, user_id: int):
     log_member(user_id)
 
-    video_name = "welcomes"
+    video_name = "welcomes_1"
     file_id = get_file_id(video_name)
 
     caption = (
+        
         "🚀 *Bienvenue !*\n\n"
         "Tu es sur le point de réserver ta place à la masterclass gratuite :\n"
         "*« Capturer les meilleures impulsions d'une tendance en 5 minutes »*\n\n"
@@ -61,7 +62,7 @@ async def send_welcome_video(bot, user_id: int):
             parse_mode="Markdown",
         )
     else:
-        video_path = "../video/welcome.mp4"
+        video_path = "video/welcome.mp4"
         msg = await bot.send_video(
             chat_id=user_id,
             video=open(video_path, "rb"),
