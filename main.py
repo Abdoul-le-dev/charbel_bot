@@ -168,7 +168,7 @@ async def get_objectif(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = query.from_user.id
 
     obj_map = {
-        "obj_methode":   "Apprendre une méthode simple et rapide pour trader",
+        "obj_methode":   "Apprendre une méthode simple et rapide",
         "obj_demo":      "Voir une démonstration en direct",
         "obj_confiance": "Gagner en confiance",
         "obj_autre":     "Autre",
@@ -178,9 +178,12 @@ async def get_objectif(update: Update, context: ContextTypes.DEFAULT_TYPE):
     upsert_user(user_id, objectif=objectif)
 
     await query.message.reply_text(
-        "📱 *Quel est ton numéro WhatsApp ?* (ex : +229 60619292)\n\n",
-        parse_mode="Markdown"
-    )
+    
+    "Donne-moi ton numéro WhatsApp,\n"
+    "je t’enverrai les rappels pour la masterclass afin que  que tu sois avec nous 👥\n\n"
+    "_(Ex : +229 60619292)_",
+    parse_mode="Markdown"
+)
     return WHATSAPP
 
 
