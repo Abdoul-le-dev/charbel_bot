@@ -1,4 +1,5 @@
 import os
+import asyncio
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import (
     ChatJoinRequestHandler, CallbackQueryHandler, Application,
@@ -11,19 +12,22 @@ TOKEN = "8416778114:AAGV9crEJYWDzMu1O3Ve2WH4lGrvc-MRkEU"
 # ── Étapes ──────────────────────────────────────────────────────────────────
 PRENOM, LEVEL, OBJECTIF, WHATSAPP, EMAIL, CONFIRMATION = range(6)
 
+PLACES_RESTANTES = 47
+PLACES_TOTALES = 250
+
 
 # ── Keyboards ────────────────────────────────────────────────────────────────
 
 def kb_level():
     return InlineKeyboardMarkup([
-    [InlineKeyboardButton("1️⃣ Débutant – je découvre encore", callback_data="level_1")],
-    [InlineKeyboardButton("2️⃣ Intermédiaire – j’ai les bases", callback_data="level_2")],
-    [InlineKeyboardButton("3️⃣ Avancé – je suis rentable", callback_data="level_3")],
-])
+        [InlineKeyboardButton("1️⃣ Je n'ai jamais tradé", callback_data="level_1")],
+        [InlineKeyboardButton("2️⃣ J'ai débuté mais sans résultats", callback_data="level_2")],
+        [InlineKeyboardButton("3️⃣ Je suis avancé", callback_data="level_3")],
+    ])
 
 def kb_objectif():
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📚 Apprendre une méthode simple", callback_data="obj_methode")],
+        [InlineKeyboardButton("📚 Apprendre une méthode simple et rapide pour trader", callback_data="obj_methode")],
         [InlineKeyboardButton("🎥 Voir une démonstration en direct", callback_data="obj_demo")],
         [InlineKeyboardButton("💪 Gagner en confiance", callback_data="obj_confiance")],
         [InlineKeyboardButton("✍️ Autre", callback_data="obj_autre")],
@@ -35,7 +39,7 @@ def kb_confirmation():
     ]])
 
 
-# ── Envoi vidéo de bienvenue (sans bouton) ───────────────────────────────────
+# ── Envoi vidéo de bienvenue ─────────────────────────────────────────────────
 
 async def send_welcome_video(bot, user_id: int):
     log_member(user_id)
@@ -66,14 +70,27 @@ async def send_welcome_video(bot, user_id: int):
         )
         save_file_id(video_name, msg.video.file_id)
 
-    # Message séparé avec l'instruction
+    # Message séparé avec urgence + instruction
     await bot.send_message(
         chat_id=user_id,
         text=(
-            "Clique ici pour confirmer ta place 👇\n\n"
+            f"⚠️ *Il ne reste que {PLACES_RESTANTES} places sur {PLACES_TOTALES} !*\n\n"
+            "Les places partent vite — assure-toi de sécuriser la tienne maintenant.\n\n"
+            "👇 Clique ici pour confirmer ta place :\n\n"
             "/JeMEnregistre"
-        )
+        ),
+        parse_mode="Markdown"
     )
+
+
+# ── Wrapper isolé pour create_task ───────────────────────────────────────────
+
+async def _send_welcome_safe(bot, user_id: int):
+    """Isolé dans une task : une erreur n'affecte jamais les autres utilisateurs."""
+    try:
+        await send_welcome_video(bot, user_id)
+    except Exception as e:
+        print(f"Erreur envoi message à {user_id} : {e}")
 
 
 # ── Approbation demande d'adhésion ───────────────────────────────────────────
@@ -82,23 +99,17 @@ async def approve_join_request(update: Update, context: ContextTypes.DEFAULT_TYP
     user = update.chat_join_request.from_user
     user_id = user.id
 
-
     await update.chat_join_request.approve()
 
-    try:
-        await send_welcome_video(context.bot, user_id)
-    except Exception as e:
-        print(f"Erreur envoi message à {user_id} : {e}")
+    # Chaque user est traité en parallèle — le handler se libère immédiatement
+    asyncio.create_task(_send_welcome_safe(context.bot, user_id))
 
 
 # ── Commande /start ───────────────────────────────────────────────────────────
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    try:
-        await send_welcome_video(context.bot, user_id)
-    except Exception as e:
-        print(f"❌ Erreur /start pour {user_id} : {e}")
+    asyncio.create_task(_send_welcome_safe(context.bot, user_id))
 
 
 # ── Conversation : /JeMEnregistre ────────────────────────────────────────────
@@ -106,10 +117,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def je_me_enregistre(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """/JeMEnregistre → démarre le formulaire"""
     await update.message.reply_text(
-    "Super ! 🎉\n\n"
-    "Moi c’est Charbel Yayi 👋 "
-    "et toi ? \n\n",
-    parse_mode="Markdown"
+        "Super ! 🎉\n\n"
+        "Moi c'est Charbel Yayi 👋 "
+        "et toi ? \n\n",
+        parse_mode="Markdown"
     )
     return PRENOM
 
@@ -135,9 +146,9 @@ async def get_level(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = query.from_user.id
 
     level_map = {
-        "level_1": "Débutant – je découvre à peine",
-        "level_2": "Intermédiaire – bases mais pas encore rentable",
-        "level_3": "Avancé – déjà rentable",
+        "level_1": "Je n'ai jamais tradé",
+        "level_2": "J'ai débuté mais sans résultats",
+        "level_3": "Je suis avancé",
     }
     level = level_map.get(query.data, "Non précisé")
     context.user_data["level"] = level
@@ -157,16 +168,17 @@ async def get_objectif(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = query.from_user.id
 
     obj_map = {
-        "obj_methode":   "Apprendre une méthode simple et rapide",
+        "obj_methode":   "Apprendre une méthode simple et rapide pour trader",
         "obj_demo":      "Voir une démonstration en direct",
         "obj_confiance": "Gagner en confiance",
+        "obj_autre":     "Autre",
     }
     objectif = obj_map.get(query.data, "Non précisé")
     context.user_data["objectif"] = objectif
     upsert_user(user_id, objectif=objectif)
 
     await query.message.reply_text(
-        "📱 *Quel est ton numéro(ex : +229 60619292) WhatsApp ?*\n\n",
+        "📱 *Quel est ton numéro WhatsApp ?* (ex : +229 60619292)\n\n",
         parse_mode="Markdown"
     )
     return WHATSAPP
@@ -179,7 +191,7 @@ async def get_whatsapp(update: Update, context: ContextTypes.DEFAULT_TYPE):
     upsert_user(user_id, whatsapp=whatsapp)
 
     await update.message.reply_text(
-        "📧 *Laisse moi aussi ton address mail :*\n\n",
+        "📧 *Laisse-moi aussi ton adresse mail :*\n\n",
         parse_mode="Markdown"
     )
     return EMAIL
@@ -240,7 +252,13 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 if __name__ == "__main__":
     init_db()
 
-    app = Application.builder().token(TOKEN).read_timeout(30).write_timeout(30).build()
+    app = (
+        Application.builder()
+        .token(TOKEN)
+        .read_timeout(30)
+        .write_timeout(30)
+        .build()
+    )
 
     # Demandes d'adhésion au canal
     app.add_handler(ChatJoinRequestHandler(approve_join_request))
