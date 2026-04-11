@@ -327,9 +327,7 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"📊 *Statistiques d'inscription :*\n\n"
         f"👥 Utilisateurs ayant démarré : *{total}*\n"
         f"✅ Inscriptions complètes : *{complets}*\n"
-        f"⏳ Inscriptions en cours : *{total - complets}*\n\n"
-        f"🎯 Places réservées : *{places_prises}/{PLACES_TOTALES}*\n"
-        f"🔥 Places restantes : *{PLACES_RESTANTES}*",
+        f"⏳ Inscriptions en cours : *{total - complets}*\n\n",
         parse_mode="Markdown"
     )
 
