@@ -82,12 +82,13 @@ async def approve_join_request(update: Update, context: ContextTypes.DEFAULT_TYP
     user = update.chat_join_request.from_user
     user_id = user.id
 
+
     await update.chat_join_request.approve()
 
     try:
         await send_welcome_video(context.bot, user_id)
     except Exception as e:
-        print(f"❌ Erreur envoi message à {user_id} : {e}")
+        print(f"Erreur envoi message à {user_id} : {e}")
 
 
 # ── Commande /start ───────────────────────────────────────────────────────────
