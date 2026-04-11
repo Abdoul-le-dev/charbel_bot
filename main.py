@@ -85,6 +85,8 @@ async def approve_join_request(update: Update, context: ContextTypes.DEFAULT_TYP
     user = update.chat_join_request.from_user
     user_id = user.id
 
+    print(f"user:{user_id}")
+
     await update.chat_join_request.approve()
 
     try:
