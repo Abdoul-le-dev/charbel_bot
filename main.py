@@ -10,7 +10,7 @@ from database.database import init_db, upsert_user, log_member, get_file_id, sav
 
 TOKEN = "8609131464:AAGK5k1jkLJvY1OSvHcR3YPnwqEqOFeWuAs"
 
-ADMIN_IDS = {1150156856 }   # ← ajoute ici tous les admins
+ADMIN_IDS = {6992809421 , 6799962131  }   # ← ajoute ici tous les admins
 
 # ── Étapes inscription ───────────────────────────────────────────────────────
 PRENOM, LEVEL, OBJECTIF, WHATSAPP, EMAIL, CONFIRMATION = range(6)
