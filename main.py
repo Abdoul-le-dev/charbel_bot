@@ -16,10 +16,10 @@ PRENOM, LEVEL, OBJECTIF, WHATSAPP, EMAIL, CONFIRMATION = range(6)
 
 def kb_level():
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("1️⃣ Débutant – je découvre à peine", callback_data="level_1")],
-        [InlineKeyboardButton("2️⃣ Intermédiaire – bases mais pas rentable", callback_data="level_2")],
-        [InlineKeyboardButton("3️⃣ Avancé – déjà rentable", callback_data="level_3")],
-    ])
+    [InlineKeyboardButton("1️⃣ Débutant – je découvre encore", callback_data="level_1")],
+    [InlineKeyboardButton("2️⃣ Intermédiaire – j’ai les bases", callback_data="level_2")],
+    [InlineKeyboardButton("3️⃣ Avancé – je suis rentable", callback_data="level_3")],
+])
 
 def kb_objectif():
     return InlineKeyboardMarkup([
@@ -105,9 +105,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def je_me_enregistre(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """/JeMEnregistre → démarre le formulaire"""
     await update.message.reply_text(
-        "Super ! 🎉\n\n"
-        "Pour commencer, *quel est ton prénom ?*",
-        parse_mode="Markdown"
+    "Super ! 🎉\n\n"
+    "Moi c’est Charbel Yayi 👋"
+    "Et toi ? \n\n",
+    parse_mode="Markdown"
     )
     return PRENOM
 
@@ -166,7 +167,7 @@ async def get_objectif(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await query.message.reply_text(
         "📱 *Quel est ton numéro WhatsApp ?*\n\n"
-        "_(Inclus l'indicatif pays, ex : +33 6 12 34 56 78)_",
+        "ex : +229 60619292",
         parse_mode="Markdown"
     )
     return WHATSAPP
@@ -179,8 +180,7 @@ async def get_whatsapp(update: Update, context: ContextTypes.DEFAULT_TYPE):
     upsert_user(user_id, whatsapp=whatsapp)
 
     await update.message.reply_text(
-        "📧 *Quelle est ton adresse e-mail ?*\n\n"
-        "_(Tu recevras une confirmation par mail)_",
+        "📧 *Laisse moi aussi ton address mail :*\n\n",
         parse_mode="Markdown"
     )
     return EMAIL
