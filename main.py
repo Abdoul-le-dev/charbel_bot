@@ -70,7 +70,7 @@ async def send_welcome_video(bot, user_id: int):
     await bot.send_message(
         chat_id=user_id,
         text=(
-            "✍️ Pour confirmer ta place, clique ici 👇\n\n"
+            "Clique ici pour confirmer ta place 👇\n\n"
             "/JeMEnregistre"
         )
     )
