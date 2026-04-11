@@ -75,9 +75,6 @@ async def send_welcome_video(bot, user_id: int):
     await bot.send_message(
         chat_id=user_id,
         text=(
-            f"🎁 *Cette masterclass est 100% GRATUITE.*\n\n"
-            f"Justement parce qu'elle est gratuite, nous sommes *très sélectifs* "
-            f"sur les participants — nous voulons des personnes vraiment motivées.\n\n"
             f"⚠️ *Il ne reste que {PLACES_RESTANTES} places sur {PLACES_TOTALES} !*\n"
             f"Les places s'envolent vite. Sécurise la tienne maintenant avant qu'il ne soit trop tard.\n\n"
             "👇 Clique ici pour réserver ta place :\n\n"
