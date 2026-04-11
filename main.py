@@ -27,7 +27,7 @@ def kb_level():
 
 def kb_objectif():
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📚 Apprendre une méthode simple et rapide pour trader", callback_data="obj_methode")],
+        [InlineKeyboardButton("📚 Apprendre une méthode simple et rapide", callback_data="obj_methode")],
         [InlineKeyboardButton("🎥 Voir une démonstration en direct", callback_data="obj_demo")],
         [InlineKeyboardButton("💪 Gagner en confiance", callback_data="obj_confiance")],
         [InlineKeyboardButton("✍️ Autre", callback_data="obj_autre")],
@@ -179,8 +179,8 @@ async def get_objectif(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await query.message.reply_text(
     
-    "Donne-moi ton numéro WhatsApp,\n"
-    "je t’enverrai les rappels pour la masterclass afin que  que tu sois avec nous 👥\n\n"
+    "Quel est ton numéro WhatsApp ?,\n"
+    "je t’enverrai les rappels pour la masterclass afin que  que tu sois avec nous \n\n"
     "_(Ex : +229 60619292)_",
     parse_mode="Markdown"
 )
