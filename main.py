@@ -7,13 +7,13 @@ from telegram.ext import (
 )
 from database.database import init_db, upsert_user, log_member, get_file_id, save_file_id
 
-TOKEN = "8609131464:AAGK5k1jkLJvY1OSvHcR3YPnwqEqOFeWuAs"
+TOKEN ="8609131464:AAGK5k1jkLJvY1OSvHcR3YPnwqEqOFeWuAs"
 
 # ── Étapes ──────────────────────────────────────────────────────────────────
 PRENOM, LEVEL, OBJECTIF, WHATSAPP, EMAIL, CONFIRMATION = range(6)
 
 PLACES_RESTANTES = 47
-PLACES_TOTALES = 250
+PLACES_TOTALES = 150
 
 
 # ── Keyboards ────────────────────────────────────────────────────────────────
@@ -22,7 +22,8 @@ def kb_level():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("1️⃣ Je n'ai jamais tradé", callback_data="level_1")],
         [InlineKeyboardButton("2️⃣ J'ai débuté mais sans résultats", callback_data="level_2")],
-        [InlineKeyboardButton("3️⃣ Je suis avancé", callback_data="level_3")],
+        [InlineKeyboardButton("3️⃣ Je trade avec des résultats irréguliers", callback_data="level_3")],
+        [InlineKeyboardButton("4️⃣ Je suis déjà rentable", callback_data="level_4")],
     ])
 
 def kb_objectif():
@@ -48,7 +49,6 @@ async def send_welcome_video(bot, user_id: int):
     file_id = get_file_id(video_name)
 
     caption = (
-        
         "🚀 *Bienvenue !*\n\n"
         "Tu es sur le point de réserver ta place à la masterclass gratuite :\n"
         "*« Capturer les meilleures impulsions d'une tendance en 5 minutes »*\n\n"
@@ -71,13 +71,16 @@ async def send_welcome_video(bot, user_id: int):
         )
         save_file_id(video_name, msg.video.file_id)
 
-    # Message séparé avec urgence + instruction
+    # Message séparé avec urgence, gratuité et sélectivité
     await bot.send_message(
         chat_id=user_id,
         text=(
-            f"⚠️ *Il ne reste que {PLACES_RESTANTES} places sur {PLACES_TOTALES} !*\n\n"
-            "Les places partent vite — assure-toi de sécuriser la tienne maintenant.\n\n"
-            "👇 Clique ici pour confirmer ta place :\n\n"
+            f"🎁 *Cette masterclass est 100% GRATUITE.*\n\n"
+            f"Justement parce qu'elle est gratuite, nous sommes *très sélectifs* "
+            f"sur les participants — nous voulons des personnes vraiment motivées.\n\n"
+            f"⚠️ *Il ne reste que {PLACES_RESTANTES} places sur {PLACES_TOTALES} !*\n"
+            f"Les places s'envolent vite. Sécurise la tienne maintenant avant qu'il ne soit trop tard.\n\n"
+            "👇 Clique ici pour réserver ta place :\n\n"
             "/JeMEnregistre"
         ),
         parse_mode="Markdown"
@@ -120,7 +123,7 @@ async def je_me_enregistre(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "Super ! 🎉\n\n"
         "Moi c'est Charbel Yayi 👋 "
-        "et toi ? \n\n",
+        "et toi ?\n\n",
         parse_mode="Markdown"
     )
     return PRENOM
@@ -149,7 +152,8 @@ async def get_level(update: Update, context: ContextTypes.DEFAULT_TYPE):
     level_map = {
         "level_1": "Je n'ai jamais tradé",
         "level_2": "J'ai débuté mais sans résultats",
-        "level_3": "Je suis avancé",
+        "level_3": "Je trade avec des résultats irréguliers",
+        "level_4": "Je suis déjà rentable",
     }
     level = level_map.get(query.data, "Non précisé")
     context.user_data["level"] = level
@@ -179,12 +183,11 @@ async def get_objectif(update: Update, context: ContextTypes.DEFAULT_TYPE):
     upsert_user(user_id, objectif=objectif)
 
     await query.message.reply_text(
-    
-    "Quel est ton numéro WhatsApp ?,\n"
-    "je t’enverrai les rappels pour la masterclass afin que  que tu sois avec nous \n\n"
-    "_(Ex : +229 60619292)_",
-    parse_mode="Markdown"
-)
+        "📱 *Quel est ton numéro WhatsApp ?*\n"
+        "Je t'enverrai les rappels pour la masterclass afin que tu sois avec nous 😊\n\n"
+        "_(Ex : +229 60619292)_",
+        parse_mode="Markdown"
+    )
     return WHATSAPP
 
 
