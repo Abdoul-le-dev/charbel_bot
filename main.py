@@ -14,11 +14,6 @@ PRENOM, LEVEL, OBJECTIF, WHATSAPP, EMAIL, CONFIRMATION = range(6)
 
 # ── Keyboards ────────────────────────────────────────────────────────────────
 
-def kb_enregistre():
-    return InlineKeyboardMarkup([[
-        InlineKeyboardButton("✅ Je m'enregistre", callback_data="enregistre")
-    ]])
-
 def kb_level():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("1️⃣ Débutant – je découvre à peine", callback_data="level_1")],
@@ -40,13 +35,9 @@ def kb_confirmation():
     ]])
 
 
-# ── Fonction commune : envoyer la vidéo de bienvenue ─────────────────────────
+# ── Envoi vidéo de bienvenue (sans bouton) ───────────────────────────────────
 
 async def send_welcome_video(bot, user_id: int):
-    """
-    Envoie la vidéo de bienvenue + bouton enregistrement.
-    Utilisée aussi bien par approve_join_request que par /start.
-    """
     log_member(user_id)
 
     video_name = "welcome"
@@ -56,7 +47,6 @@ async def send_welcome_video(bot, user_id: int):
         "🚀 *Bienvenue !*\n\n"
         "Tu es sur le point de réserver ta place à la masterclass gratuite :\n"
         "*« Capturer les meilleures impulsions d'une tendance en 5 minutes »*\n\n"
-        "Clique sur le bouton ci-dessous pour t'enregistrer 👇"
     )
 
     if file_id:
@@ -65,18 +55,25 @@ async def send_welcome_video(bot, user_id: int):
             video=file_id,
             caption=caption,
             parse_mode="Markdown",
-            reply_markup=kb_enregistre()
         )
     else:
-        video_path = "video/welcome.mp4"
+        video_path = "../video/welcome.mp4"
         msg = await bot.send_video(
             chat_id=user_id,
             video=open(video_path, "rb"),
             caption=caption,
             parse_mode="Markdown",
-            reply_markup=kb_enregistre()
         )
         save_file_id(video_name, msg.video.file_id)
+
+    # Message séparé avec l'instruction
+    await bot.send_message(
+        chat_id=user_id,
+        text=(
+            "✍️ Pour confirmer ta place, clique ici 👇\n\n"
+            "/JeMEnregistre"
+        )
+    )
 
 
 # ── Approbation demande d'adhésion ───────────────────────────────────────────
@@ -84,8 +81,6 @@ async def send_welcome_video(bot, user_id: int):
 async def approve_join_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.chat_join_request.from_user
     user_id = user.id
-
-    print(f"user:{user_id}")
 
     await update.chat_join_request.approve()
 
@@ -100,19 +95,16 @@ async def approve_join_request(update: Update, context: ContextTypes.DEFAULT_TYP
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     try:
-        print('go')
         await send_welcome_video(context.bot, user_id)
     except Exception as e:
         print(f"❌ Erreur /start pour {user_id} : {e}")
 
 
-# ── Conversation ──────────────────────────────────────────────────────────────
+# ── Conversation : /JeMEnregistre ────────────────────────────────────────────
 
-async def start_enregistrement(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-
-    await query.message.reply_text(
+async def je_me_enregistre(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/JeMEnregistre → démarre le formulaire"""
+    await update.message.reply_text(
         "Super ! 🎉\n\n"
         "Pour commencer, *quel est ton prénom ?*",
         parse_mode="Markdown"
@@ -174,8 +166,7 @@ async def get_objectif(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await query.message.reply_text(
         "📱 *Quel est ton numéro WhatsApp ?*\n\n"
-        "_(Inclus l'indicatif pays, ex : +33 6 12 34 56 78)_\n\n"
-        "Tu recevras le lien du live et les rappels directement sur WhatsApp.",
+        "_(Inclus l'indicatif pays, ex : +33 6 12 34 56 78)_",
         parse_mode="Markdown"
     )
     return WHATSAPP
@@ -189,7 +180,7 @@ async def get_whatsapp(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(
         "📧 *Quelle est ton adresse e-mail ?*\n\n"
-        "_(Tu recevras aussi une confirmation par mail)_",
+        "_(Tu recevras une confirmation par mail)_",
         parse_mode="Markdown"
     )
     return EMAIL
@@ -241,7 +232,7 @@ async def confirmer_inscription(update: Update, context: ContextTypes.DEFAULT_TY
 
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Inscription annulée. Tape /start pour recommencer.")
+    await update.message.reply_text("Inscription annulée. Tape /JeMEnregistre pour recommencer.")
     return ConversationHandler.END
 
 
@@ -255,12 +246,12 @@ if __name__ == "__main__":
     # Demandes d'adhésion au canal
     app.add_handler(ChatJoinRequestHandler(approve_join_request))
 
-    # /start → même vidéo que l'adhésion
+    # /start → vidéo de bienvenue + instruction /JeMEnregistre
     app.add_handler(CommandHandler("start", start))
 
-    # Conversation d'enregistrement
+    # Conversation déclenchée par /JeMEnregistre
     conv = ConversationHandler(
-        entry_points=[CallbackQueryHandler(start_enregistrement, pattern="^enregistre$")],
+        entry_points=[CommandHandler("JeMEnregistre", je_me_enregistre)],
         states={
             PRENOM:       [MessageHandler(filters.TEXT & ~filters.COMMAND, get_prenom)],
             LEVEL:        [CallbackQueryHandler(get_level, pattern="^level_")],
@@ -272,6 +263,7 @@ if __name__ == "__main__":
         fallbacks=[CommandHandler("cancel", cancel)],
         per_chat=False,
         per_user=True,
+        allow_reentry=True,
     )
     app.add_handler(conv)
 
