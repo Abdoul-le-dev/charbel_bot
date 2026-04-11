@@ -44,7 +44,7 @@ def kb_confirmation():
 async def send_welcome_video(bot, user_id: int):
     log_member(user_id)
 
-    video_name = "welcome"
+    video_name = "welcomes"
     file_id = get_file_id(video_name)
 
     caption = (
