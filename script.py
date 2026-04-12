@@ -10,7 +10,7 @@ from telegram.ext import (
 )
 from database.database import init_db, upsert_user, log_member, get_file_id, save_file_id
 
-TOKEN = "8609131464:AAGK5k1jkLJvY1OSvHcR3YPnwqEqOFeWuAs"
+TOKEN = ""
 
 ADMIN_IDS      = {6992809421, 6799962131}
 ADMIN_USERNAME = "@Faiseur2Rois"
@@ -272,14 +272,7 @@ def kb_relance():
 
 async def send_welcome_video(bot, user_id: int):
     log_member(user_id)
-    with db() as conn:
-        conn.execute(
-            """INSERT INTO users (telegram_id, categorie)
-               VALUES (?, ?)
-               ON CONFLICT(telegram_id) DO UPDATE SET categorie = excluded.categorie""",
-            (user_id, EVENEMENT_ACTUEL)
-        )
-        conn.commit()
+    upsert_user(user_id, categorie=EVENEMENT_ACTUEL)  
 
     video_name = "welcomes_2"
     file_id    = get_file_id(video_name)
