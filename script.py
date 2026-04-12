@@ -648,7 +648,7 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         total    = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
         complets = conn.execute("SELECT COUNT(*) FROM users WHERE completed=1").fetchone()[0]
         try:
-            members = conn.execute("SELECT COUNT(*) FROM members").fetchone()[0]
+            members = conn.execute("SELECT COUNT(*) FROM members_log").fetchone()[0]
         except Exception:
             members = "—"
         try:
