@@ -296,7 +296,7 @@ async def send_welcome_video(bot, user_id: int):
     await bot.send_message(
         chat_id=user_id,
         text=(
-            f"⚠️ *Il ne reste que peu de place\n"
+            f"⚠️ *Il ne reste que peu de place*\n"
             "Les places s'envolent vite. Sécurise la tienne maintenant.\n\n"
             "👇 Clique ici pour réserver ta place :\n\n"
             "/JeMEnregistre"
@@ -438,7 +438,7 @@ async def _broadcast_relance(bot, admin_id: int, users: list[dict]):
                     f"⚠️ *{prenom}, ton inscription n'a pas encore été validée*\n\n"
                     "Tu as commencé à t'inscrire à la masterclass gratuite, "
                     "mais tu n'as pas finalisé ta demande.\n\n"
-                    f"Il ne reste que *{PLACES_RESTANTES} places sur {PLACES_TOTALES}* "
+                    f"Il ne reste que peu de place "
                     "et elles partent vite.\n\n"
                     "Clique sur le bouton ci-dessous pour sécuriser ta place :"
                 ),
