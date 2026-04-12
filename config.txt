@@ -1,0 +1,14 @@
+[Unit]
+Description=Bot Telegram Masterclass
+After=network.target
+
+[Service]
+User=root
+WorkingDirectory=/home/ubuntu/bot/charbel_bot
+ExecStart=/home/ubuntu/bot/charbel_bot/venv/bin/python /home/ubuntu/bot/charbel_bot/script.py
+Restart=always
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target

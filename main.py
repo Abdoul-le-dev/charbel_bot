@@ -123,7 +123,8 @@ async def send_welcome_video(bot, user_id: int):
 
 async def _send_welcome_safe(bot, user_id: int):
     try:
-        await send_welcome_video(bot, user_id)
+       # await send_welcome_video(bot, user_id)
+       print('yes')
     except Exception as e:
         print(f"Erreur envoi message à {user_id} : {e}")
 
