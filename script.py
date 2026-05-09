@@ -10,12 +10,15 @@ from telegram.ext import (
 )
 from database.database import init_db, upsert_user, log_member, get_file_id, save_file_id
 
+# ── Module sondage (totalement autonome) ─────────────────────────────────────
+from sondage import init_sondage_db, register_sondage_handlers
+
 TOKEN = "8609131464:AAGK5k1jkLJvY1OSvHcR3YPnwqEqOFeWuAs"
 
 ADMIN_IDS      = {6992809421, 6799962131}
 ADMIN_USERNAME = "@Faiseur2Rois"
 
-EVENEMENT_ACTUEL = "Masterclass Gratuite – Trading Tendance"
+
 
 PLACES_RESTANTES = 47
 PLACES_TOTALES   = 150
@@ -76,6 +79,17 @@ def _migrate_db():
         conn.commit()
 
 
+
+def _get_last_category() -> str | None:
+    with db() as conn:
+        row = conn.execute(
+            "SELECT nom FROM categories WHERE active=1 ORDER BY creee_le DESC LIMIT 1"
+        ).fetchone()
+    return row["nom"] if row else None
+
+
+EVENEMENT_ACTUEL = _get_last_category() 
+
 def _is_already_registered(user_id: int) -> bool:
     with db() as conn:
         row = conn.execute(
@@ -91,33 +105,26 @@ def _is_already_registered(user_id: int) -> bool:
 
 def _get_incomplete_users() -> list[dict]:
     with db() as conn:
-        rows = conn.execute(
-            "SELECT telegram_id, prenom FROM users WHERE completed = 0 AND telegram_id IS NOT NULL"
-        ).fetchall()
+        rows = conn.execute("""
+            SELECT m.telegram_id, u.prenom
+            FROM members_log m
+            LEFT JOIN users u ON u.telegram_id = m.telegram_id
+            WHERE u.telegram_id IS NULL
+               OR u.completed = 0
+            ORDER BY m.joined_at DESC
+        """).fetchall()
     return [dict(r) for r in rows]
 
 
 def _get_all_user_ids() -> list[int]:
-    """
-    Retourne TOUS les telegram_id depuis members_log (source principale).
-    Pour chaque id, on recupere le prenom dans users si disponible.
-    C'est la table qui contient vraiment tout le monde.
-    """
     with db() as conn:
-        rows = conn.execute(
-            "SELECT DISTINCT telegram_id FROM members_log WHERE telegram_id IS NOT NULL"
-        ).fetchall()
+        rows = conn.execute("""
+            SELECT telegram_id FROM users
+            WHERE telegram_id IS NOT NULL
+            UNION
+            SELECT telegram_id FROM members_log
+        """).fetchall()
     return [r["telegram_id"] for r in rows]
-
-
-def _get_prenom_for_broadcast(user_id: int) -> str:
-    """Retourne le prenom de l'utilisateur ou 'Hello l ami' si inconnu."""
-    with db() as conn:
-        row = conn.execute(
-            "SELECT prenom FROM users WHERE telegram_id = ? AND prenom IS NOT NULL",
-            (user_id,)
-        ).fetchone()
-    return row["prenom"] if row else "Hello l ami"
 
 
 def _get_categories() -> list[str]:
@@ -230,7 +237,7 @@ def _extraire_prenom(texte: str) -> tuple[str, bool]:
 
 
 # ════════════════════════════════════════════════════════════════════════════
-# ── KEYBOARDS ─────────────────────────────────────────────────────────────────
+# ── KEYBOARDS ────────────────────────────────────────────────────────────────
 # ════════════════════════════════════════════════════════════════════════════
 
 def kb_prenom_confirm(prenom: str):
@@ -272,7 +279,7 @@ def kb_relance():
 
 async def send_welcome_video(bot, user_id: int):
     log_member(user_id)
-    upsert_user(user_id, categorie=EVENEMENT_ACTUEL)  
+    upsert_user(user_id, categorie=EVENEMENT_ACTUEL)
 
     video_name = "welcomes_2"
     file_id    = get_file_id(video_name)
@@ -296,7 +303,7 @@ async def send_welcome_video(bot, user_id: int):
     await bot.send_message(
         chat_id=user_id,
         text=(
-            f"⚠️ *Il ne reste que peu de place*\n"
+            "⚠️ *Il ne reste que peu de place*\n"
             "Les places s'envolent vite. Sécurise la tienne maintenant.\n\n"
             "👇 Clique ici pour réserver ta place :\n\n"
             "/JeMEnregistre"
@@ -345,7 +352,6 @@ async def approve_join_request(update: Update, context: ContextTypes.DEFAULT_TYP
     try:
         await update.chat_join_request.approve()
     except Exception as e:
-        # "User_already_participant" : deja dans le canal, on envoie quand meme le message
         print(f"approve() uid={user_id} : {e}")
     asyncio.create_task(_handle_join(context.bot, user_id))
 
@@ -354,7 +360,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     args    = context.args
 
-    # Lien profond : t.me/bot?start=JeMenregistre
     if args and args[0] == "JeMenregistre":
         await update.message.reply_text(
             "Super 🎉 Clique sur /JeMEnregistre pour t'inscrire à la masterclass.",
@@ -374,33 +379,48 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ════════════════════════════════════════════════════════════════════════════
 
 async def message_libre(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message or not update.message.text:
+        return
+
     user    = update.effective_user
     user_id = user.id
-    texte   = update.message.text or ""
+    texte   = update.message.text.lower().strip()
 
     _touch_last_seen(user_id)
     _log_message(user_id, texte)
 
-    await update.message.reply_text(
-        "📨 Ton message a bien été reçu.\n\n"
-        f"Pour une réponse rapide et personnalisée, contacte directement "
-        f"*Charbel* sur Telegram : {ADMIN_USERNAME}\n\n"
-        "Il te répondra dès que possible 😊",
-        parse_mode="Markdown"
-    )
+    if "present" in texte or "présent" in texte:
+        reponse = (
+            "Je suis tres content de savoir que tu seras la ce soir  !\n\n"
+            "N'oublie pas, c'est a 21h heure de Cotonou\n\n"
+            "Je t'enverrai le lien du live juste avant ici et sur WhatsApp si possible"
+        )
+        await update.message.reply_text(reponse)
+    elif "merci" in texte:
+        await update.message.reply_text("jtp !")
+    elif "ok" in texte:
+        await update.message.reply_text("Super !")
+    else:
+        await update.message.reply_text(
+            "Ton message a bien ete recu.\n\n"
+            f"Pour une reponse rapide, contacte directement "
+            f"Charbel sur Telegram : {ADMIN_USERNAME}\n\n"
+            "Il te repondra des que possible"
+        )
 
-    username  = f"@{user.username}" if user.username else f"id:{user_id}"
-    prenom_tg = user.first_name or ""
+    username      = f"@{user.username}" if user.username else f"id:{user_id}"
+    prenom_tg     = user.first_name or ""
+    texte_affiche = update.message.text[:200]
+
     notif = (
-        f"💬 *Nouveau message reçu*\n\n"
-        f"👤 {prenom_tg} ({username})\n"
-        f"ID : `{user_id}`\n\n"
-        f"_{texte}_"
+        f"Nouveau message recu\n\n"
+        f"Utilisateur : {prenom_tg} ({username})\n"
+        f"ID : {user_id}\n\n"
+        f"Message : {texte_affiche}"
     )
     for admin_id in ADMIN_IDS:
         try:
-            await context.bot.send_message(chat_id=admin_id, text=notif,
-                                           parse_mode="Markdown")
+            await context.bot.send_message(chat_id=admin_id, text=notif)
         except Exception as e:
             print(f"Notif admin {admin_id} : {e}")
 
@@ -427,7 +447,8 @@ async def relancer(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def _broadcast_relance(bot, admin_id: int, users: list[dict]):
-    sent = 0
+    sent = blocked = erreurs = 0
+
     for u in users:
         uid    = u["telegram_id"]
         prenom = u["prenom"] or "Hello l'ami"
@@ -438,8 +459,7 @@ async def _broadcast_relance(bot, admin_id: int, users: list[dict]):
                     f"⚠️ *{prenom}, ton inscription n'a pas encore été validée*\n\n"
                     "Tu as commencé à t'inscrire à la masterclass gratuite, "
                     "mais tu n'as pas finalisé ta demande.\n\n"
-                    f"Il ne reste que peu de place "
-                    "et elles partent vite.\n\n"
+                    "Il ne reste que peu de place et elles partent vite.\n\n"
                     "Clique sur le bouton ci-dessous pour sécuriser ta place :"
                 ),
                 parse_mode="Markdown",
@@ -447,12 +467,26 @@ async def _broadcast_relance(bot, admin_id: int, users: list[dict]):
             )
             sent += 1
         except Exception as e:
-            print(f"Relance uid={uid} : {e}")
+            err = str(e)
+            if "Forbidden" in err or "blocked" in err.lower():
+                blocked += 1
+                print(f"Relance uid={uid} : user a bloque le bot")
+            elif "can't initiate" in err:
+                erreurs += 1
+                print(f"Relance uid={uid} : n'a jamais contacte le bot")
+            else:
+                erreurs += 1
+                print(f"Relance uid={uid} : {e}")
+
         await asyncio.sleep(0.1)
 
     await bot.send_message(
         admin_id,
-        f"Relance terminée — *{sent}/{len(users)}* messages envoyés",
+        f"Relance terminée\n\n"
+        f"*{sent}* envoyés\n"
+        f"*{blocked}* ont bloqué le bot\n"
+        f"*{erreurs}* autres erreurs\n"
+        f"Total ciblé : *{len(users)}*",
         parse_mode="Markdown"
     )
 
@@ -460,10 +494,15 @@ async def _broadcast_relance(bot, admin_id: int, users: list[dict]):
 async def relance_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    await query.message.reply_text(
-        "Super 🎉 Clique sur /JeMEnregistre pour finaliser ton inscription.",
-        parse_mode="Markdown"
-    )
+    texte_reponse = "Super 🎉 Clique sur /JeMEnregistre pour finaliser ton inscription."
+    if query.message:
+        await query.message.reply_text(texte_reponse, parse_mode="Markdown")
+    else:
+        await context.bot.send_message(
+            chat_id=query.from_user.id,
+            text=texte_reponse,
+            parse_mode="Markdown"
+        )
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -648,6 +687,12 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
             msgs = conn.execute("SELECT COUNT(*) FROM messages_libres").fetchone()[0]
         except Exception:
             msgs = "—"
+        try:
+            nb_sondages = conn.execute("SELECT COUNT(*) FROM sondages WHERE actif=1").fetchone()[0]
+            nb_votes    = conn.execute("SELECT COUNT(*) FROM sondage_reponses").fetchone()[0]
+        except Exception:
+            nb_sondages = "—"
+            nb_votes    = "—"
 
     await update.message.reply_text(
         f"*Statistiques :*\n\n"
@@ -655,9 +700,103 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Formulaire demarre : *{total}*\n"
         f"Inscriptions completes : *{complets}*\n"
         f"En cours : *{total - complets}*\n\n"
-        f"Messages libres recus : *{msgs}*",
+        f"Messages libres recus : *{msgs}*\n\n"
+        f"Sondages actifs : *{nb_sondages}*\n"
+        f"Votes enregistres : *{nb_votes}*",
         parse_mode="Markdown"
     )
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# ── EXPORT EXCEL ──────────────────────────────────────────────────────────────
+# ════════════════════════════════════════════════════════════════════════════
+
+async def export_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id not in ADMIN_IDS:
+        await update.message.reply_text("Commande reservee a l administrateur.")
+        return
+
+    await update.message.reply_text("Generation du fichier Excel en cours...")
+
+    try:
+        import openpyxl
+        from openpyxl.styles import Font, PatternFill, Alignment
+        import io
+
+        with db() as conn:
+            rows = conn.execute("""
+                SELECT
+                    m.telegram_id,
+                    m.joined_at,
+                    u.prenom,
+                    u.level,
+                    u.objectif,
+                    u.whatsapp,
+                    u.email,
+                    u.categorie,
+                    CASE WHEN u.completed = 1 THEN 'Oui' ELSE 'Non' END AS complet,
+                    u.last_seen
+                FROM members_log m
+                LEFT JOIN users u ON u.telegram_id = m.telegram_id
+                ORDER BY m.joined_at DESC
+            """).fetchall()
+
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "Tous les membres"
+
+        headers = [
+            "ID Telegram", "Date arrivee", "Prenom", "Niveau", "Objectif",
+            "WhatsApp", "Email", "Categorie", "Inscription complete", "Derniere activite"
+        ]
+        header_fill = PatternFill("solid", fgColor="1F4E79")
+        header_font = Font(bold=True, color="FFFFFF")
+
+        for col, h in enumerate(headers, start=1):
+            cell = ws.cell(row=1, column=col, value=h)
+            cell.fill      = header_fill
+            cell.font      = header_font
+            cell.alignment = Alignment(horizontal="center")
+            ws.column_dimensions[cell.column_letter].width = 22
+
+        for row_idx, row in enumerate(rows, start=2):
+            values = [
+                row["telegram_id"], row["joined_at"] or "",
+                row["prenom"] or "", row["level"] or "",
+                row["objectif"] or "", row["whatsapp"] or "",
+                row["email"] or "", row["categorie"] or "",
+                row["complet"] or "Non", row["last_seen"] or "",
+            ]
+            fill = PatternFill("solid", fgColor="EBF3FB" if row_idx % 2 == 0 else "FFFFFF")
+            for col_idx, val in enumerate(values, start=1):
+                ws.cell(row=row_idx, column=col_idx, value=val).fill = fill
+
+        buf = io.BytesIO()
+        wb.save(buf)
+        buf.seek(0)
+
+        total     = len(rows)
+        complets  = sum(1 for r in rows if r["complet"] == "Oui")
+        sans_info = sum(1 for r in rows if not r["prenom"])
+
+        await update.message.reply_document(
+            document=buf,
+            filename="membres_complet.xlsx",
+            caption=(
+                "Export complet\n\n"
+                + "Total membres : *" + str(total) + "*\n"
+                + "Inscriptions completes : *" + str(complets) + "*\n"
+                + "Sans informations (formulaire non rempli) : *" + str(sans_info) + "*"
+            ),
+            parse_mode="Markdown"
+        )
+
+    except ImportError:
+        await update.message.reply_text(
+            "Le module openpyxl n est pas installe. Lance : pip install openpyxl"
+        )
+    except Exception as e:
+        await update.message.reply_text(f"Erreur lors de l export : {e}")
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -695,7 +834,7 @@ async def get_prenom(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if len(prenom_candidat) > 15:
             await update.message.reply_text(
-                f"J'ai du mal a identifier ton prenom dans ce que tu as ecrit.\n\n"
+                "J'ai du mal a identifier ton prenom dans ce que tu as ecrit.\n\n"
                 "Peux-tu m'envoyer *uniquement ton prenom* s'il te plait ?",
                 parse_mode="Markdown"
             )
@@ -848,10 +987,6 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def timeout_inscription(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    Declenche automatiquement apres 5 minutes d'inactivite.
-    update.message peut etre None dans ce contexte, on utilise effective_chat.
-    """
     user_id = update.effective_user.id if update.effective_user else None
     if user_id:
         try:
@@ -872,98 +1007,7 @@ async def timeout_inscription(update: Update, context: ContextTypes.DEFAULT_TYPE
 # ── GESTIONNAIRE D'ERREURS GLOBAL ────────────────────────────────────────────
 # ════════════════════════════════════════════════════════════════════════════
 
-async def export_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    /export_users — admin uniquement.
-    Exporte toute la table users en fichier Excel et l'envoie en DM.
-    """
-    if update.effective_user.id not in ADMIN_IDS:
-        await update.message.reply_text("Commande reservee a l administrateur.")
-        return
-
-    await update.message.reply_text("Generation du fichier Excel en cours...")
-
-    try:
-        import openpyxl
-        from openpyxl.styles import Font, PatternFill, Alignment
-        import io
-
-        with db() as conn:
-            rows = conn.execute("""
-                SELECT telegram_id, prenom, level, objectif, whatsapp, email,
-                       categorie, completed, last_seen
-                FROM users
-                ORDER BY rowid DESC
-            """).fetchall()
-
-        wb = openpyxl.Workbook()
-        ws = wb.active
-        ws.title = "Inscrits"
-
-        # En-têtes
-        headers = ["ID Telegram", "Prenom", "Niveau", "Objectif",
-                   "WhatsApp", "Email", "Categorie", "Complet", "Derniere activite"]
-        header_fill = PatternFill("solid", fgColor="1F4E79")
-        header_font = Font(bold=True, color="FFFFFF")
-
-        for col, h in enumerate(headers, start=1):
-            cell = ws.cell(row=1, column=col, value=h)
-            cell.fill   = header_fill
-            cell.font   = header_font
-            cell.alignment = Alignment(horizontal="center")
-            ws.column_dimensions[cell.column_letter].width = 22
-
-        # Données
-        for row_idx, row in enumerate(rows, start=2):
-            values = [
-                row["telegram_id"],
-                row["prenom"]   or "",
-                row["level"]    or "",
-                row["objectif"] or "",
-                row["whatsapp"] or "",
-                row["email"]    or "",
-                row["categorie"] or "",
-                "Oui" if row["completed"] == 1 else "Non",
-                row["last_seen"] or "",
-            ]
-            fill_color = "EBF3FB" if row_idx % 2 == 0 else "FFFFFF"
-            fill = PatternFill("solid", fgColor=fill_color)
-            for col_idx, val in enumerate(values, start=1):
-                cell = ws.cell(row=row_idx, column=col_idx, value=val)
-                cell.fill = fill
-
-        # Sauvegarder en memoire
-        buf = io.BytesIO()
-        wb.save(buf)
-        buf.seek(0)
-
-        total = len(rows)
-        complets = sum(1 for r in rows if r["completed"] == 1)
-
-        await update.message.reply_document(
-            document=buf,
-            filename="inscrits.xlsx",
-            caption=(
-                "Export de la table users\n\n"
-                + "Total : *" + str(total) + "* utilisateurs\n"
-                + "Inscriptions completes : *" + str(complets) + "*"
-            ),
-            parse_mode="Markdown"
-        )
-
-    except ImportError:
-        await update.message.reply_text(
-            "Le module openpyxl n est pas installe. Lance : pip install openpyxl"
-        )
-    except Exception as e:
-        await update.message.reply_text(f"Erreur lors de l export : {e}")
-
-
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
-    """
-    Capture toutes les exceptions non gerees et notifie les admins.
-    Envoie : type d'erreur + traceback complet + contexte (user, commande).
-    """
     tb = "".join(traceback.format_exception(
         type(context.error), context.error, context.error.__traceback__
     ))
@@ -976,9 +1020,7 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
         msg   = update.message or (update.callback_query.message if update.callback_query else None)
         texte = (msg.text or "")[:100] if msg else ""
 
-    # Tronquer le traceback a 2000 chars max (limite Telegram)
-    tb_court = tb[-2000:] if len(tb) > 2000 else tb
-
+    tb_court  = tb[-2000:] if len(tb) > 2000 else tb
     ligne_sep = "\n"
     notif = (
         "*ERREUR BOT*" + ligne_sep + ligne_sep
@@ -998,13 +1040,15 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             print(f"Impossible d'envoyer l'erreur a l'admin {admin_id} : {e}")
 
+
 # ════════════════════════════════════════════════════════════════════════════
 # ── MAIN ──────────────────────────────────────────────────────────────────────
 # ════════════════════════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
     init_db()
-    _migrate_db()
+    #_migrate_db()
+    init_sondage_db()   # ← crée les tables sondages, sondage_options, sondage_reponses
 
     app = (
         Application.builder()
@@ -1014,13 +1058,15 @@ if __name__ == "__main__":
         .build()
     )
 
+    # ── Handlers standards ────────────────────────────────────────────────
     app.add_handler(ChatJoinRequestHandler(approve_join_request))
-    app.add_handler(CommandHandler("start",              start))
-    app.add_handler(CommandHandler("stats",              stats))
-    app.add_handler(CommandHandler("relancer",           relancer))
-    app.add_handler(CommandHandler("export_users",       export_users))
+    app.add_handler(CommandHandler("start",        start))
+    app.add_handler(CommandHandler("stats",        stats))
+    app.add_handler(CommandHandler("relancer",     relancer))
+    app.add_handler(CommandHandler("export_users", export_users))
     app.add_handler(CallbackQueryHandler(relance_callback, pattern="^relance_go$"))
 
+    # ── Conversations ─────────────────────────────────────────────────────
     conv_inscription = ConversationHandler(
         entry_points=[CommandHandler("JeMEnregistre", je_me_enregistre)],
         states={
@@ -1038,7 +1084,7 @@ if __name__ == "__main__":
         },
         fallbacks=[CommandHandler("cancel", cancel)],
         per_chat=False, per_user=True, allow_reentry=True,
-        conversation_timeout=300,   # 5 minutes d'inactivite
+        conversation_timeout=300,
     )
 
     conv_broadcast = ConversationHandler(
@@ -1066,7 +1112,10 @@ if __name__ == "__main__":
     app.add_handler(conv_broadcast)
     app.add_handler(conv_categorie)
 
-    # En dernier — capture tout message hors conversation
+    # ── Handlers sondage (conversations + callbacks + stats) ──────────────
+    register_sondage_handlers(app)
+
+    # ── En dernier — capture tout message hors conversation ───────────────
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_libre))
 
     print("start...")
