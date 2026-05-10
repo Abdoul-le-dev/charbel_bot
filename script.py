@@ -314,6 +314,7 @@ async def send_welcome_video(bot, user_id: int):
 
 async def _send_welcome_safe(bot, user_id: int):
     try:
+        print('ici')
         await send_welcome_video(bot, user_id)
     except Exception as e:
         print(f"Erreur bienvenue uid={user_id} : {e}")
@@ -339,9 +340,9 @@ async def _reply_already_registered(bot, user_id: int):
 
 async def _handle_join(bot, user_id: int):
     try:
-        if _is_already_registered(user_id):
-            await _reply_already_registered(bot, user_id)
-        else:
+        # if _is_already_registered(user_id):
+        #     await _reply_already_registered(bot, user_id)
+        # else:
             await send_welcome_video(bot, user_id)
     except Exception as e:
         print(f"Erreur join uid={user_id} : {e}")
@@ -353,6 +354,8 @@ async def approve_join_request(update: Update, context: ContextTypes.DEFAULT_TYP
         await update.chat_join_request.approve()
     except Exception as e:
         print(f"approve() uid={user_id} : {e}")
+
+    print('yes')
     asyncio.create_task(_handle_join(context.bot, user_id))
 
 
