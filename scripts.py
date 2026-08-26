@@ -46,7 +46,6 @@ def db():
 
 
 def _migrate_db():
-    print('start')
     with db() as conn:
         cur = conn.cursor()
         colonnes_a_ajouter = {
@@ -86,8 +85,6 @@ def _migrate_db():
             )
         """)
         conn.commit()
-
-        print("Migration terminée. Colonnes ajoutées et tables créées si nécessaire.")
 
 
 def _get_last_category() -> str | None:
@@ -339,7 +336,7 @@ async def send_welcome_video(bot, user_id: int):
     log_member(user_id)
     upsert_user(user_id, categorie=EVENEMENT_ACTUEL)
 
-    video_name = "welcomes_12"
+    video_name = "welcomes_222"
     file_id    = get_file_id(video_name)
     caption    = (
         "🚀 *Bienvenue dans Trading Pour Tous !*\n\n"
@@ -1149,12 +1146,12 @@ async def get_deja_trade(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Logique conditionnelle : si "Non", proposer les vidéos d'initiation
     if reponse == "Non":
         await query.message.reply_text(
-            "🎬 *Tu débutes en trading ?*\n\n"
-            "On a préparé une série de *10 vidéos d'initiation*, spécialement pour toi, "
+            "🎬 <b>Tu débutes en trading ?</b>\n\n"
+            "On a préparé une série de <b>10 vidéos d'initiation</b>, spécialement pour toi, "
             "pour que tu arrives à la formation gratuite déjà à l'aise avec les bases.\n\n"
-            f"👉 Clique ici pour les rejoindre : {LIEN_YOUTUBE_DEBUTANTS}\n\n"
-            "_On continue ton inscription 👇_",
-            parse_mode="Markdown",
+            f'👉 <a href="{LIEN_YOUTUBE_DEBUTANTS}">Clique ici pour les rejoindre</a>\n\n'
+            "<i>On continue ton inscription 👇</i>",
+            parse_mode="HTML",
             disable_web_page_preview=False
         )
 
