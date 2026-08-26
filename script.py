@@ -339,7 +339,7 @@ async def send_welcome_video(bot, user_id: int):
     log_member(user_id)
     upsert_user(user_id, categorie=EVENEMENT_ACTUEL)
 
-    video_name = "welcomes_2"
+    video_name = "welcomes_3"
     file_id    = get_file_id(video_name)
     caption    = (
         "🚀 *Bienvenue dans Trading Pour Tous !*\n\n"
@@ -355,7 +355,7 @@ async def send_welcome_video(bot, user_id: int):
     else:
         msg = await bot.send_video(
             chat_id=user_id,
-            video=open("video/welcome.mp4", "rb"),
+            video=open("video/welcomes.mp4", "rb"),
             caption=caption, parse_mode="Markdown"
         )
         save_file_id(video_name, msg.video.file_id)
