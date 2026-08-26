@@ -46,6 +46,7 @@ def db():
 
 
 def _migrate_db():
+    print('start')
     with db() as conn:
         cur = conn.cursor()
         colonnes_a_ajouter = {
@@ -85,6 +86,8 @@ def _migrate_db():
             )
         """)
         conn.commit()
+
+        print("Migration terminée. Colonnes ajoutées et tables créées si nécessaire.")
 
 
 def _get_last_category() -> str | None:
