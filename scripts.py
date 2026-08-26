@@ -19,7 +19,7 @@ ADMIN_IDS      = {6992809421, 6799962131}
 ADMIN_USERNAME = "@Faiseur2Rois"
 
 # ── Lien vidéos débutants ─────────────────────────────────────────────────────
-LIEN_YOUTUBE_DEBUTANTS = "https://www.youtube.com/live/Cr-uCj8iQX4?si=L1fFk_8zl3dnW8ii"
+LIEN_YOUTUBE_DEBUTANTS = "https://www.youtube.com/playlist?list=PLAb_R9D1XURA"
 
 PLACES_RESTANTES = 47
 PLACES_TOTALES   = 150
