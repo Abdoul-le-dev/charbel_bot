@@ -339,7 +339,7 @@ async def send_welcome_video(bot, user_id: int):
     log_member(user_id)
     upsert_user(user_id, categorie=EVENEMENT_ACTUEL)
 
-    video_name = "welcomes_3"
+    video_name = "welcomes_122"
     file_id    = get_file_id(video_name)
     caption    = (
         "🚀 *Bienvenue dans Trading Pour Tous !*\n\n"
