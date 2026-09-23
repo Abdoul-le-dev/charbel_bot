@@ -22,19 +22,17 @@ from telegram.ext import (
 
 from database import database as db
 from sondage import init_sondage_db, register_sondage_handlers   # module sondage : inchangé
-from dotenv import load_dotenv
 
-load_dotenv()
 # ════════════════════════════════════════════════════════════════════════════
 # CONFIGURATION
 # ════════════════════════════════════════════════════════════════════════════
 
-TOKEN = os.getenv("TOKEN")          # ne JAMAIS écrire le token dans le code
+TOKEN = os.getenv("BOT_TOKEN")          # ne JAMAIS écrire le token dans le code
 ADMIN_IDS = {6992809421, 6799962131}
 ADMIN_USERNAME = "@Faiseur2Rois"
 
 WEBINAIRE = "2026-09-30"                # identifiant du webinaire : sert à savoir qui est déjà inscrit
-HEURE_LIVE = 20                         # heure du Bénin
+HEURE_LIVE = 21                         # heure du Bénin
 DUREE_LIVE = 2                          # heures (uniquement pour le calendrier)
 JOURS = {
     1: {"date": "2026-09-30", "nom": "30 septembre", "semaine": "mercredi",
@@ -44,18 +42,8 @@ JOURS = {
 }
 
 VIDEO_BIENVENUE = "video/welcomes.MP4"
-VIDEO_RELANCE = "video/welcomes.MP4"                    # à la racine
+VIDEO_RELANCE = "bienvenu.mp4"                    # à la racine
 # VIDEO_BULLE = "bulle.mp4"                       # vidéo ronde (voir demarrer_questionnaire)
-
-# Stickers envoyés à des moments clés du parcours (accueil, confirmation de la place, lien du direct).
-# Choisis peu d'endroits mais cohérents : trop de stickers casse la lecture.
-# Pour récupérer un file_id : envoie le sticker au bot (ou à @RawDataBot) et copie sticker.file_id.
-# Une valeur vide "" désactive simplement l'envoi à cet endroit (aucune erreur).
-STICKERS = {
-    "bienvenue": "",       # à l'arrivée dans le canal, juste après la vidéo d'accueil
-    "confirmation": "",    # juste après « C'est noté, {prénom} »
-    "live": "",            # envoyé avec le bloc du lien du direct
-}
 
 FREINS = ["Le manque de temps", "La peur de perdre de l'argent",
           "Je ne sais pas par où commencer", "Autre"]
@@ -63,7 +51,6 @@ FREINS = ["Le manque de temps", "La peur de perdre de l'argent",
 TOLERANCE = timedelta(minutes=20)       # au-delà, un rappel en retard n'est plus envoyé
 PAUSE_ENVOI = 0.1                       # secondes entre deux envois (limite Telegram)
 A_COMPLETER = "À COMPLÉTER"             # un rappel contenant ce mot n'est jamais envoyé
-DELAI_LIEN_LIVE = 120                   # secondes d'attente après le bloc calendrier avant le lien du direct
 
 FORMAT = "%Y-%m-%d %H:%M:%S"
 h = html.escape
@@ -108,34 +95,12 @@ def kb(*boutons):
     return InlineKeyboardMarkup([[InlineKeyboardButton(t, callback_data=d)] for t, d in boutons])
 
 
-def kb_demarrer(texte="✅ Je confirme ma place"):
+def kb_demarrer(texte="Je confirme ma place"):
     return kb((texte, "demarrer"))
 
 
 async def ecrire(bot, uid, texte, markup=None):
-    """Envoie un message texte et retourne l'objet Message (utile pour mémoriser son id)."""
-    return await bot.send_message(chat_id=uid, text=texte, parse_mode="HTML", reply_markup=markup)
-
-
-async def envoyer_sticker(bot, uid, cle):
-    """Envoie le sticker configuré pour ce moment du parcours (STICKERS). Silencieux si non configuré."""
-    file_id = STICKERS.get(cle)
-    if not file_id:
-        return
-    try:
-        await bot.send_sticker(chat_id=uid, sticker=file_id)
-    except Exception as e:
-        print(f"Sticker « {cle} » uid={uid} : {e}")
-
-
-async def supprimer(bot, chat_id, message_id):
-    """Supprime un message si possible (déjà supprimé, trop vieux ou droits insuffisants = on ignore)."""
-    if not message_id:
-        return
-    try:
-        await bot.delete_message(chat_id=chat_id, message_id=message_id)
-    except Exception:
-        pass
+    await bot.send_message(chat_id=uid, text=texte, parse_mode="HTML", reply_markup=markup)
 
 
 async def envoyer_video(bot, uid, chemin, caption=None, markup=None, nom=None, parse_mode=None):
@@ -259,8 +224,7 @@ def _valider_whatsapp(texte: str) -> str | None:
 # QUESTIONNAIRE — piloté par la base : on repart toujours de la 1re question sans réponse
 # ════════════════════════════════════════════════════════════════════════════
 
-PRENOMS_A_CONFIRMER = {}        # uid -> (prénom proposé, message_id du texte brut envoyé), en attente Oui/Non
-DERNIERE_QUESTION = {}          # uid -> message_id de la dernière question envoyée (supprimée une fois répondue)
+PRENOMS_A_CONFIRMER = {}        # uid -> prénom proposé, en attente du bouton Oui/Non
 
 
 def prochaine_etape(u) -> str:
@@ -319,39 +283,35 @@ async def demarrer_questionnaire(bot, uid):
 
 
 async def poser_question(bot, uid):
-    """Pose la prochaine question et mémorise son message_id pour pouvoir le supprimer une fois répondu."""
     u = db.get_user(uid)
     etape = prochaine_etape(u)
 
     if etape == "prenom":
-        msg = await ecrire(bot, uid, "<b>Question 1 sur 5</b>\n\nQuel est ton prénom ?")
+        await ecrire(bot, uid, "<b>Question 1 sur 5</b>\n\nQuel est ton prénom ?")
     elif etape == "whatsapp":
-        msg = await ecrire(bot, uid, "<b>Question 2 sur 5</b>\n\nQuel est ton numéro WhatsApp ?\n\n"
+        await ecrire(bot, uid, "<b>Question 2 sur 5</b>\n\nQuel est ton numéro WhatsApp ?\n\n"
                                "<i>Avec l'indicatif, par exemple : +229 60619292</i>")
     elif etape == "trade":
-        msg = await ecrire(bot, uid, "<b>Question 3 sur 5</b>\n\nAs-tu déjà fait du trading ?",
+        await ecrire(bot, uid, "<b>Question 3 sur 5</b>\n\nAs-tu déjà fait du trading ?",
                      kb(("Oui", "q:trade:Oui"), ("Non", "q:trade:Non")))
     elif etape == "frein":
-        msg = await ecrire(bot, uid, "<b>Question 4 sur 5</b>\n\nQu'est-ce qui t'a empêché jusqu'ici de te lancer ?",
+        await ecrire(bot, uid, "<b>Question 4 sur 5</b>\n\nQu'est-ce qui t'a empêché jusqu'ici de te lancer ?",
                      kb(*[(f, f"q:frein:{i}") for i, f in enumerate(FREINS)]))
     elif etape == "presence":
-        msg = await ecrire(bot, uid, "<b>Question 5 sur 5</b>\n\nTa présence\n\n<i>En direct uniquement, pas de replay.</i>",
+        await ecrire(bot, uid, "<b>Question 5 sur 5</b>\n\nTa présence\n\n<i>En direct uniquement, pas de replay.</i>",
                      kb((f"Je serai là en direct les DEUX soirs, à {HEURE_LIVE}h", "q:presence:deux"),
                         ("Je serai là un seul soir", "q:presence:un")))
     elif etape == "soir":
-        msg = await ecrire(bot, uid, "<b>Lequel des deux soirs ?</b>",
+        await ecrire(bot, uid, "<b>Lequel des deux soirs ?</b>",
                      kb(*[(JOURS[j]["nom"], f"q:soir:{j}") for j in JOURS]))
     else:
-        msg = await ecrire(bot, uid, f"<b>Tout est prêt, {h(u.get('prenom') or '')}.</b>\n\n"
+        await ecrire(bot, uid, f"<b>Tout est prêt, {h(u.get('prenom') or '')}.</b>\n\n"
                                "Il ne reste qu'un clic pour verrouiller ta place.",
                      kb(("Confirmer ma place", "q:confirme:1")))
 
-    DERNIERE_QUESTION[uid] = msg.message_id
 
-
-async def repondre_texte(bot, uid, texte, message_id) -> bool:
-    """Texte reçu = réponse au questionnaire (prénom / WhatsApp) ? Retourne False si ce n'est pas le cas.
-    Une réponse valide supprime le message de la question ET le message de réponse, pour plus de clarté."""
+async def repondre_texte(bot, uid, texte) -> bool:
+    """Texte reçu = réponse au questionnaire (prénom / WhatsApp) ? Retourne False si ce n'est pas le cas."""
     u = db.get_user(uid)
     if not u or not u.get("en_cours"):
         return False
@@ -364,12 +324,11 @@ async def repondre_texte(bot, uid, texte, message_id) -> bool:
                 await ecrire(bot, uid, "J'ai du mal à identifier ton prénom dans ce message.\n\n"
                                        "Peux-tu m'envoyer <b>uniquement ton prénom</b> ?")
                 return True
-            PRENOMS_A_CONFIRMER[uid] = (prenom, message_id)
+            PRENOMS_A_CONFIRMER[uid] = prenom
             await ecrire(bot, uid, f"Ton prénom est bien <b>{h(prenom)}</b> ?",
                          kb((f"Oui, c'est bien {prenom}", "prenom:oui"), ("Non, je corrige", "prenom:non")))
             return True
         db.upsert_user(uid, prenom=prenom)
-        await supprimer(bot, uid, message_id)
 
     elif etape == "whatsapp":
         numero = _valider_whatsapp(texte)
@@ -378,12 +337,10 @@ async def repondre_texte(bot, uid, texte, message_id) -> bool:
                                    "Envoie-le avec l'indicatif, par exemple :\n<b>+229 60619292</b>")
             return True
         db.upsert_user(uid, whatsapp=numero)
-        await supprimer(bot, uid, message_id)
 
     else:
         return False
 
-    await supprimer(bot, uid, DERNIERE_QUESTION.pop(uid, None))
     await poser_question(bot, uid)
     return True
 
@@ -392,19 +349,12 @@ async def confirmer_prenom(bot, uid, reponse) -> bool:
     u = db.get_user(uid)
     if not u or prochaine_etape(u) != "prenom":
         return False
-    donnee = PRENOMS_A_CONFIRMER.pop(uid, None)
-    prenom, message_brut_id = donnee if donnee else (None, None)
-
+    prenom = PRENOMS_A_CONFIRMER.pop(uid, None)
     if reponse == "oui" and prenom:
         db.upsert_user(uid, prenom=prenom)
-        await supprimer(bot, uid, message_brut_id)                        # le prénom brut tapé par l'utilisateur
-        await supprimer(bot, uid, DERNIERE_QUESTION.pop(uid, None))        # « Quel est ton prénom ? »
         await poser_question(bot, uid)
     else:
-        await supprimer(bot, uid, message_brut_id)
-        await supprimer(bot, uid, DERNIERE_QUESTION.pop(uid, None))
-        msg = await ecrire(bot, uid, "Pas de souci.\n\nEnvoie-moi juste ton prénom :")
-        DERNIERE_QUESTION[uid] = msg.message_id
+        await ecrire(bot, uid, "Pas de souci.\n\nEnvoie-moi juste ton prénom :")
     return True
 
 
@@ -448,7 +398,7 @@ async def gerer_souci(bot, uid):
 
 
 # ════════════════════════════════════════════════════════════════════════════
-# CONFIRMATION : place confirmée → calendrier → (2 min) → lien du live
+# CONFIRMATION : place confirmée → calendrier → lien du live
 # ════════════════════════════════════════════════════════════════════════════
 
 def _utc(jour):
@@ -492,23 +442,13 @@ def fichier_ics(jours) -> bytes:
 
 
 async def envoyer_confirmation(bot, uid):
-    """Confirme la place, propose le calendrier, puis programme l'envoi du lien du direct
-    DELAI_LIEN_LIVE secondes plus tard (en tâche de fond, pour ne pas bloquer la suite)."""
     u = db.get_user(uid)
     jours = jours_choisis(u)
     await ecrire(bot, uid, f"<b>C'est noté, {h(u['prenom'])}.</b>\n\n"
                            f"Ta place est confirmée pour {dates_texte(jours)} à {HEURE_LIVE}h.")
-    await envoyer_sticker(bot, uid, "confirmation")
     await ecrire(bot, uid, "<b>Ajoute la formation à ton calendrier</b>\n\nPour ne pas oublier.",
                  kb(("Android : Google Agenda", "agenda:android"),
                     ("iPhone : fichier calendrier", "agenda:iphone")))
-    lancer(envoyer_bloc_lien_direct(bot, uid, jours))
-
-
-async def envoyer_bloc_lien_direct(bot, uid, jours):
-    """Envoyé DELAI_LIEN_LIVE secondes après le bloc calendrier (plus de clarté : un message à la fois)."""
-    await asyncio.sleep(DELAI_LIEN_LIVE)
-    await envoyer_sticker(bot, uid, "live")
     await ecrire(bot, uid,
                  "<b>Ton lien pour le direct</b>\n\n"
                  "Garde-le précieusement.\n\n"
@@ -551,7 +491,6 @@ async def envoyer_bienvenue(bot, uid, lien_entree=None):
         f"<b>Dates</b>\n{JOURS[1]['nom']} et {JOURS[2]['nom']}, à {HEURE_LIVE}h00 (heure du Bénin)\n\n"
         "<b>Format</b>\nEn direct uniquement. Places limitées.")
     await envoyer_video(bot, uid, VIDEO_BIENVENUE, legende, nom="welcomes_222", parse_mode="HTML")
-    await envoyer_sticker(bot, uid, "bienvenue")
     await ecrire(bot, uid, "<b>Il reste peu de places.</b>\n\nClique ci-dessous pour confirmer la tienne.",
                  kb_demarrer())
 
@@ -614,10 +553,9 @@ async def boutons(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     elif action == "souci":
         await gerer_souci(bot, uid)
 
-    if accepte:                          # on supprime la question déjà répondue (question + réponse), pour plus de clarté
-        DERNIERE_QUESTION.pop(uid, None)
+    if accepte:                          # on retire les boutons d'une question déjà répondue
         try:
-            await q.message.delete()
+            await q.edit_message_reply_markup(reply_markup=None)
         except Exception:
             pass
 
@@ -653,9 +591,9 @@ async def message_libre(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid, brut = user.id, update.message.text
     db.touch_last_seen(uid)
 
-    if await traiter_code(bot, uid, brut):                                # 1. code du soir
+    if await traiter_code(bot, uid, brut):           # 1. code du soir
         return
-    if await repondre_texte(bot, uid, brut, update.message.message_id):   # 2. réponse au questionnaire
+    if await repondre_texte(bot, uid, brut):         # 2. réponse au questionnaire
         return
 
     db.log_message(uid, brut)                        # 3. message libre → on prévient l'admin
