@@ -1,209 +1,142 @@
-import re
+"""
+Bot Trading Pour Tous — webinaire des 30 septembre et 1er octobre 2026.
+Fichier principal.   Lancer :  BOT_TOKEN=xxxx python script.py
+"""
 import asyncio
-import sqlite3
+import functools
+import html
+import io
+import os
+import re
 import traceback
 import unicodedata
-from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardRemove
+from collections import Counter
+from datetime import datetime, timedelta, timezone
+from urllib.parse import urlencode
+
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
-    ChatJoinRequestHandler, CallbackQueryHandler, Application,
-    CommandHandler, MessageHandler, filters, ContextTypes, ConversationHandler
+    Application, CallbackQueryHandler, ChatJoinRequestHandler, CommandHandler,
+    ContextTypes, ConversationHandler, MessageHandler, filters,
 )
-from database.database import init_db, upsert_user, log_member, get_file_id, save_file_id
 
-# ── Module sondage (totalement autonome) ─────────────────────────────────────
-from sondage import init_sondage_db, register_sondage_handlers
+from database import database as db
+from sondage import init_sondage_db, register_sondage_handlers   # module sondage : inchangé
 
-TOKEN = "8609131464:AAGK5k1jkLJvY1OSvHcR3YPnwqEqOFeWuAs"
+# ════════════════════════════════════════════════════════════════════════════
+# CONFIGURATION
+# ════════════════════════════════════════════════════════════════════════════
 
-ADMIN_IDS      = {6992809421, 6799962131}
+TOKEN = os.getenv("BOT_TOKEN")          # ne JAMAIS écrire le token dans le code
+ADMIN_IDS = {6992809421, 6799962131}
 ADMIN_USERNAME = "@Faiseur2Rois"
 
-# ── Lien vidéos débutants ─────────────────────────────────────────────────────
-LIEN_YOUTUBE_DEBUTANTS = "https://www.youtube.com/playlist?list=PLAb_R9D1XURA"
+WEBINAIRE = "2026-09-30"                # identifiant du webinaire : sert à savoir qui est déjà inscrit
+HEURE_LIVE = 20                         # heure du Bénin
+DUREE_LIVE = 2                          # heures (uniquement pour le calendrier)
+JOURS = {
+    1: {"date": "2026-09-30", "nom": "30 septembre", "semaine": "mercredi",
+        "live": "https://youtube.com/live/jEC7hAcVlTQ?feature=share"},
+    2: {"date": "2026-10-01", "nom": "1er octobre", "semaine": "jeudi",
+        "live": "https://youtube.com/live/TNjFGH64FHQ?feature=share"},
+}
 
-PLACES_RESTANTES = 47
-PLACES_TOTALES   = 150
+VIDEO_BIENVENUE = "video/welcomes.MP4"
+VIDEO_RELANCE = "bienvenu.mp4"                    # à la racine
+# VIDEO_BULLE = "bulle.mp4"                       # vidéo ronde (voir demarrer_questionnaire)
 
-# ── États inscription ─────────────────────────────────────────────────────────
-(PRENOM, PRENOM_CONFIRM, WHATSAPP, PAYS, DEJA_TRADE,
- INTERET, PRESENCE, FREIN, CONFIRMATION) = range(9)
+FREINS = ["Le manque de temps", "La peur de perdre de l'argent",
+          "Je ne sais pas par où commencer", "Autre"]
 
-# ── États broadcast ───────────────────────────────────────────────────────────
-BC_CIBLE, BC_FORMAT, BC_MEDIA, BC_TEXT = range(9, 13)
+TOLERANCE = timedelta(minutes=20)       # au-delà, un rappel en retard n'est plus envoyé
+PAUSE_ENVOI = 0.1                       # secondes entre deux envois (limite Telegram)
+A_COMPLETER = "À COMPLÉTER"             # un rappel contenant ce mot n'est jamais envoyé
 
-# ── États création de catégorie ───────────────────────────────────────────────
-CAT_NOM = 13
-
-
-# ════════════════════════════════════════════════════════════════════════════
-# ── BASE DE DONNÉES ───────────────────────────────────────────────────────────
-# ════════════════════════════════════════════════════════════════════════════
-
-def db():
-    conn = sqlite3.connect("preinscriptions.db")
-    conn.row_factory = sqlite3.Row
-    return conn
+FORMAT = "%Y-%m-%d %H:%M:%S"
+h = html.escape
 
 
-def _migrate_db():
-    with db() as conn:
-        cur = conn.cursor()
-        colonnes_a_ajouter = {
-            "categorie":  f"TEXT DEFAULT '{EVENEMENT_ACTUEL}'",
-            "last_seen":  "DATETIME",
-            # ── Nouvelles colonnes formulaire Trading Pour Tous ──
-            "pays":       "TEXT",
-            "deja_trade": "TEXT",
-            "interet":    "TEXT",
-            "presence":   "TEXT",
-            "frein":      "TEXT",
-        }
-        cur.execute("PRAGMA table_info(users)")
-        existantes = {row["name"] for row in cur.fetchall()}
-        for col, definition in colonnes_a_ajouter.items():
-            if col not in existantes:
-                cur.execute(f"ALTER TABLE users ADD COLUMN {col} {definition}")
-
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS categories (
-                id        INTEGER PRIMARY KEY AUTOINCREMENT,
-                nom       TEXT UNIQUE NOT NULL,
-                creee_le  DATETIME DEFAULT (datetime('now')),
-                active    INTEGER DEFAULT 1
-            )
-        """)
-        cur.execute(
-            "INSERT OR IGNORE INTO categories (nom) VALUES (?)",
-            (EVENEMENT_ACTUEL,)
-        )
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS messages_libres (
-                id          INTEGER PRIMARY KEY AUTOINCREMENT,
-                telegram_id INTEGER,
-                texte       TEXT,
-                recu_le     DATETIME DEFAULT (datetime('now'))
-            )
-        """)
-        conn.commit()
+def debut_live(jour) -> datetime:
+    """Début du live, heure du Bénin."""
+    return datetime.strptime(JOURS[jour]["date"], "%Y-%m-%d") + timedelta(hours=HEURE_LIVE)
 
 
-def _get_last_category() -> str | None:
-    with db() as conn:
-        row = conn.execute(
-            "SELECT nom FROM categories WHERE active=1 ORDER BY creee_le DESC LIMIT 1"
-        ).fetchone()
-    return row["nom"] if row else None
+SEUILS = {j: debut_live(j).strftime(FORMAT) for j in JOURS}    # clic à partir de là = présent
 
 
-EVENEMENT_ACTUEL = _get_last_category()
+def jour_courant():
+    aujourdhui = db.now_benin().strftime("%Y-%m-%d")
+    return next((j for j, v in JOURS.items() if v["date"] == aujourdhui), None)
 
 
-def _is_already_registered(user_id: int) -> bool:
-    """Vérifie l'inscription selon les NOUVEAUX champs obligatoires."""
-    with db() as conn:
-        row = conn.execute(
-            """SELECT 1 FROM users
-               WHERE telegram_id = ? AND completed = 1
-                 AND prenom IS NOT NULL AND whatsapp IS NOT NULL
-                 AND pays IS NOT NULL AND deja_trade IS NOT NULL
-                 AND interet IS NOT NULL AND presence IS NOT NULL
-                 AND frein IS NOT NULL""",
-            (user_id,)
-        ).fetchone()
-    return row is not None
+def dates_texte(jours) -> str:
+    return "le " + " et le ".join(JOURS[j]["nom"] for j in jours)
 
 
-def _get_incomplete_users() -> list[dict]:
-    with db() as conn:
-        rows = conn.execute("""
-            SELECT m.telegram_id, u.prenom
-            FROM members_log m
-            LEFT JOIN users u ON u.telegram_id = m.telegram_id
-            WHERE u.telegram_id IS NULL
-               OR u.completed = 0
-            ORDER BY m.joined_at DESC
-        """).fetchall()
-    return [dict(r) for r in rows]
-
-
-def _get_all_user_ids() -> list[int]:
-    with db() as conn:
-        rows = conn.execute("""
-            SELECT telegram_id FROM users
-            WHERE telegram_id IS NOT NULL
-            UNION
-            SELECT telegram_id FROM members_log
-        """).fetchall()
-    return [r["telegram_id"] for r in rows]
-
-
-def _get_users_by_filter(filter_type: str, filter_value: str) -> list[int]:
-    """
-    Retourne les user_ids selon un filtre.
-    filter_type : 'presence' | 'frein' | 'deja_trade' | 'interet' | 'all' | 'incomplets'
-    filter_value : la valeur exacte à matcher (ignoré pour 'all' et 'incomplets')
-    """
-    with db() as conn:
-        if filter_type == "all":
-            rows = conn.execute("""
-                SELECT telegram_id FROM users WHERE telegram_id IS NOT NULL
-                UNION
-                SELECT telegram_id FROM members_log
-            """).fetchall()
-        elif filter_type == "incomplets":
-            rows = conn.execute("""
-                SELECT m.telegram_id
-                FROM members_log m
-                LEFT JOIN users u ON u.telegram_id = m.telegram_id
-                WHERE u.telegram_id IS NULL OR u.completed = 0
-            """).fetchall()
-        elif filter_type == "complets":
-            rows = conn.execute(
-                "SELECT telegram_id FROM users WHERE completed = 1"
-            ).fetchall()
-        else:
-            # presence, frein, deja_trade, interet
-            rows = conn.execute(
-                f"SELECT telegram_id FROM users WHERE {filter_type} = ? AND completed = 1",
-                (filter_value,)
-            ).fetchall()
-    return [r["telegram_id"] for r in rows]
-
-
-def _get_categories() -> list[str]:
-    with db() as conn:
-        rows = conn.execute(
-            "SELECT nom FROM categories WHERE active = 1 ORDER BY id"
-        ).fetchall()
-    return [r["nom"] for r in rows]
-
-
-def _ajouter_categorie(nom: str):
-    with db() as conn:
-        conn.execute("INSERT OR IGNORE INTO categories (nom) VALUES (?)", (nom,))
-        conn.commit()
-
-
-def _touch_last_seen(user_id: int):
-    with db() as conn:
-        conn.execute(
-            "UPDATE users SET last_seen = datetime('now') WHERE telegram_id = ?",
-            (user_id,)
-        )
-        conn.commit()
-
-
-def _log_message(user_id: int, texte: str):
-    with db() as conn:
-        conn.execute(
-            "INSERT INTO messages_libres (telegram_id, texte) VALUES (?, ?)",
-            (user_id, texte)
-        )
-        conn.commit()
+def jours_choisis(u) -> list[int]:
+    return [j for j in JOURS if u and u.get(f"veut_j{j}")] or list(JOURS)
 
 
 # ════════════════════════════════════════════════════════════════════════════
-# ── NETTOYAGE DU PRÉNOM ───────────────────────────────────────────────────────
+# OUTILS D'ENVOI
+# ════════════════════════════════════════════════════════════════════════════
+
+TACHES = set()          # garde une référence aux tâches de fond
+
+
+def lancer(coroutine):
+    tache = asyncio.create_task(coroutine)
+    TACHES.add(tache)
+    tache.add_done_callback(TACHES.discard)
+
+
+def kb(*boutons):
+    """Un bouton par ligne. Chaque bouton = (texte, callback_data)."""
+    return InlineKeyboardMarkup([[InlineKeyboardButton(t, callback_data=d)] for t, d in boutons])
+
+
+def kb_demarrer(texte="✅ Je confirme ma place"):
+    return kb((texte, "demarrer"))
+
+
+async def ecrire(bot, uid, texte, markup=None):
+    await bot.send_message(chat_id=uid, text=texte, parse_mode="HTML", reply_markup=markup)
+
+
+async def envoyer_video(bot, uid, chemin, caption=None, markup=None, nom=None, parse_mode=None):
+    """Envoie une vidéo ; le fichier n'est téléversé qu'une fois (file_id gardé en base)."""
+    nom = nom or chemin
+    file_id = db.get_file_id(nom)
+    if file_id:
+        await bot.send_video(chat_id=uid, video=file_id, caption=caption,
+                             parse_mode=parse_mode, reply_markup=markup)
+        return
+    with open(chemin, "rb") as f:
+        msg = await bot.send_video(chat_id=uid, video=f, caption=caption,
+                                   parse_mode=parse_mode, reply_markup=markup)
+    db.save_file_id(nom, msg.video.file_id)
+
+
+async def prevenir_admins(bot, texte):
+    for admin_id in ADMIN_IDS:
+        try:
+            await bot.send_message(chat_id=admin_id, text=texte)
+        except Exception as e:
+            print(f"Notif admin {admin_id} : {e}")
+
+
+def admin_seulement(fonction):
+    @functools.wraps(fonction)
+    async def enveloppe(update, ctx, *args, **kwargs):
+        if update.effective_user.id not in ADMIN_IDS:
+            await update.message.reply_text("⛔ Commande réservée à l'administrateur.")
+            return ConversationHandler.END
+        return await fonction(update, ctx, *args, **kwargs)
+    return enveloppe
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# NETTOYAGE DU PRÉNOM (logique d'origine, inchangée)
 # ════════════════════════════════════════════════════════════════════════════
 
 def _nettoyer_prenom(texte: str) -> str:
@@ -214,7 +147,7 @@ def _nettoyer_prenom(texte: str) -> str:
 
     for ancien, nouveau in [
         ("mappelle", " "), ("cest", " "), ("mest", " "),
-        ("jsuis", " "),    ("chuis", " "),
+        ("jsuis", " "), ("chuis", " "),
     ]:
         t = t.replace(ancien, nouveau)
 
@@ -269,1144 +202,877 @@ def _nettoyer_prenom(texte: str) -> str:
 
 
 def _extraire_prenom(texte: str) -> tuple[str, bool]:
-    brut      = texte.strip()
-    mots_brut = brut.split()
-
-    if len(mots_brut) <= 2 and len(brut) <= 20:
+    """Retourne (prénom, confirmation_requise)."""
+    brut = texte.strip()
+    if len(brut.split()) <= 2 and len(brut) <= 20:
         return brut.title(), False
-
-    nettoye = _nettoyer_prenom(brut)
-    return nettoye, True
+    return _nettoyer_prenom(brut), True
 
 
-# ════════════════════════════════════════════════════════════════════════════
-# ── KEYBOARDS ────────────────────────────────────────────────────────────────
-# ════════════════════════════════════════════════════════════════════════════
-
-def kb_prenom_confirm(prenom: str):
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton(f"✅ Oui, c'est bien {prenom}", callback_data="prenom_oui")],
-        [InlineKeyboardButton("✏️ Non, je vais corriger",     callback_data="prenom_non")],
-    ])
-
-def kb_deja_trade():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("✅ Oui", callback_data="trade_oui")],
-        [InlineKeyboardButton("❌ Non", callback_data="trade_non")],
-    ])
-
-def kb_interet():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("💰 Un revenu complémentaire",       callback_data="int_revenu")],
-        [InlineKeyboardButton("📚 Apprendre une nouvelle compétence", callback_data="int_competence")],
-        [InlineKeyboardButton("🕊️ L'indépendance financière",       callback_data="int_independance")],
-        [InlineKeyboardButton("✍️ Autre",                            callback_data="int_autre")],
-    ])
-
-def kb_presence():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("✅ Oui, les deux jours",   callback_data="pres_deux")],
-        [InlineKeyboardButton("⚠️ Un seul des deux jours", callback_data="pres_un")],
-    ])
-
-def kb_frein():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("⏱️ Le manque de temps",           callback_data="frein_temps")],
-        [InlineKeyboardButton("😰 La peur de perdre de l'argent", callback_data="frein_peur")],
-        [InlineKeyboardButton("🤷 Je ne sais pas par où commencer", callback_data="frein_commencer")],
-        [InlineKeyboardButton("✍️ Autre",                          callback_data="frein_autre")],
-    ])
-
-def kb_confirmation():
-    return InlineKeyboardMarkup([[
-        InlineKeyboardButton("🚀 Confirmer mon inscription !", callback_data="confirme")
-    ]])
-
-def kb_relance():
-    return InlineKeyboardMarkup([[
-        InlineKeyboardButton("✅ Je finalise mon inscription", callback_data="relance_go")
-    ]])
+def _valider_whatsapp(texte: str) -> str | None:
+    """Accepte avec ou sans '+', espaces/tirets tolérés, 8 à 15 chiffres."""
+    texte = texte.strip()
+    if not re.fullmatch(r"\+?[\d\s.\-()]+", texte):
+        return None
+    chiffres = re.sub(r"\D", "", texte)
+    if not 8 <= len(chiffres) <= 15:
+        return None
+    return ("+" if texte.startswith("+") else "") + chiffres
 
 
 # ════════════════════════════════════════════════════════════════════════════
-# ── VIDÉO DE BIENVENUE ───────────────────────────────────────────────────────
+# QUESTIONNAIRE — piloté par la base : on repart toujours de la 1re question sans réponse
 # ════════════════════════════════════════════════════════════════════════════
 
-async def send_welcome_video(bot, user_id: int):
-    log_member(user_id)
-    upsert_user(user_id, categorie=EVENEMENT_ACTUEL)
+PRENOMS_A_CONFIRMER = {}        # uid -> prénom proposé, en attente du bouton Oui/Non
 
-    video_name = "welcomes_222"
-    file_id    = get_file_id(video_name)
-    caption    = (
-        "🚀 *Bienvenue dans Trading Pour Tous !*\n\n"
-        "Tu es sur le point de réserver ta place à la formation gratuite :\n"
-        "*« Trading Pour Tous »*\n\n"
-        "📅 *2 et 3 septembre à 21h00* (heure du Bénin)\n"
-        "🎥 En direct uniquement — places limitées"
-    )
 
-    if file_id:
-        await bot.send_video(chat_id=user_id, video=file_id,
-                             caption=caption, parse_mode="Markdown")
+def prochaine_etape(u) -> str:
+    if not u.get("prenom"):     return "prenom"
+    if not u.get("whatsapp"):   return "whatsapp"
+    if not u.get("deja_trade"): return "trade"
+    if not u.get("frein"):      return "frein"
+    if not u.get("presence"):   return "presence"
+    if u["presence"] == "Un seul soir" and u.get("veut_j1") is None:
+        return "soir"
+    return "confirmation"
+
+
+def restantes(u) -> int:
+    manquantes = sum(1 for c in ("prenom", "whatsapp", "deja_trade", "frein", "presence") if not u.get(c))
+    return manquantes + (prochaine_etape(u) == "soir")
+
+
+def inscrit(u) -> bool:
+    return bool(u and u.get("completed") == 1 and u.get("webinaire") == WEBINAIRE)
+
+
+async def message_deja_inscrit(bot, uid):
+    u = db.get_user(uid)
+    await ecrire(
+        bot, uid,
+        "✅ <b>Tu es déjà inscrit(e) à la formation Trading Pour Tous</b>\n\n"
+        f"Rendez-vous {dates_texte(jours_choisis(u))} à {HEURE_LIVE}h00 (heure du Bénin).\n\n"
+        "Ton lien du direct et tous les rappels te seront envoyés ici, en privé.\n\n"
+        "Hâte de te voir en ligne 🔥")
+
+
+async def demarrer_questionnaire(bot, uid):
+    u = db.get_user(uid)
+    if inscrit(u):                                  # jamais deux fois pour la même personne
+        await message_deja_inscrit(bot, uid)
+        return
+
+    if not u or u.get("webinaire") != WEBINAIRE:
+        # Nouveau webinaire : on garde prénom / WhatsApp / Q3 / Q4 déjà connus,
+        # mais la présence est à redonner (les anciennes réponses concernaient septembre).
+        db.upsert_user(uid, webinaire=WEBINAIRE, presence=None, veut_j1=None, veut_j2=None,
+                       completed=0, relance10=0, relance30=0)
+    db.upsert_user(uid, en_cours=1)
+
+    await ecrire(
+        bot, uid,
+        "🚀 <b>Confirme ta place — Formation gratuite Trading Pour Tous</b>\n\n"
+        f"📅 <b>{JOURS[1]['nom']} et {JOURS[2]['nom']}, {HEURE_LIVE}h00</b> (heure du Bénin) — En direct\n"
+        "🎥 En direct uniquement — places limitées")
+
+    # ── Vidéo en bulle (désactivée) — pour l'activer : décommenter, mettre le fichier à la racine
+    # (carré, 1 minute max) et définir VIDEO_BULLE en haut du fichier.
+    # with open(VIDEO_BULLE, "rb") as f:
+    #     await bot.send_video_note(chat_id=uid, video_note=f)
+
+    await poser_question(bot, uid)
+
+
+async def poser_question(bot, uid):
+    u = db.get_user(uid)
+    etape = prochaine_etape(u)
+    prenom = h(u.get("prenom") or "")
+
+    if etape == "prenom":
+        await ecrire(bot, uid, "<b>1/5 — Ton prénom ?</b> 😊\n\n<i>Réponds simplement avec ton prénom</i>")
+    elif etape == "whatsapp":
+        await ecrire(bot, uid, f"Enchanté {prenom} 👋\n\n<b>2/5 — Ton numéro WhatsApp ?</b>\n"
+                               "<i>(avec l'indicatif, ex : +229 60619292)</i>")
+    elif etape == "trade":
+        await ecrire(bot, uid, "<b>3/5 — As-tu déjà fait du trading ?</b>",
+                     kb(("✅ Oui", "q:trade:Oui"), ("❌ Non", "q:trade:Non")))
+    elif etape == "frein":
+        await ecrire(bot, uid, "<b>4/5 — Qu'est-ce qui t'a empêché jusqu'ici de te lancer ?</b>",
+                     kb(*[(f, f"q:frein:{i}") for i, f in enumerate(FREINS)]))
+    elif etape == "presence":
+        await ecrire(bot, uid, "<b>5/5 — Ta présence</b>\n\n<i>⚠️ En direct uniquement, pas de replay</i>",
+                     kb((f"✅ Je serai là en direct les DEUX soirs, à {HEURE_LIVE}h", "q:presence:deux"),
+                        ("⚠️ Je serai là un seul soir", "q:presence:un")))
+    elif etape == "soir":
+        await ecrire(bot, uid, "<b>Lequel des deux soirs ?</b>",
+                     kb(*[(f"📅 {JOURS[j]['nom']}", f"q:soir:{j}") for j in JOURS]))
     else:
-        msg = await bot.send_video(
-            chat_id=user_id,
-            video=open("video/welcomes.MP4", "rb"),
-            caption=caption, parse_mode="Markdown"
-        )
-        save_file_id(video_name, msg.video.file_id)
-
-    await bot.send_message(
-        chat_id=user_id,
-        text=(
-            "⚠️ *Il ne reste que peu de places*\n"
-            "Les places s'envolent vite. Sécurise la tienne maintenant.\n\n"
-            "👇 Clique ici pour confirmer ta place :\n\n"
-            "/JeMEnregistre"
-        ),
-        parse_mode="Markdown"
-    )
+        await ecrire(bot, uid, f"Parfait {prenom} ! Il ne reste qu'un clic pour verrouiller ta place 👇",
+                     kb(("🚀 Confirmer ma place", "q:confirme:1")))
 
 
-async def _send_welcome_safe(bot, user_id: int):
+async def repondre_texte(bot, uid, texte) -> bool:
+    """Texte reçu = réponse au questionnaire (prénom / WhatsApp) ? Retourne False si ce n'est pas le cas."""
+    u = db.get_user(uid)
+    if not u or not u.get("en_cours"):
+        return False
+    etape = prochaine_etape(u)
+
+    if etape == "prenom":
+        prenom, a_confirmer = _extraire_prenom(texte)
+        if a_confirmer:
+            if len(prenom) > 15:
+                await ecrire(bot, uid, "J'ai du mal à identifier ton prénom dans ce message.\n\n"
+                                       "Peux-tu m'envoyer <b>uniquement ton prénom</b> ?")
+                return True
+            PRENOMS_A_CONFIRMER[uid] = prenom
+            await ecrire(bot, uid, f"Est-ce que ton prénom est <b>{h(prenom)}</b> ?",
+                         kb((f"✅ Oui, c'est bien {prenom}", "prenom:oui"), ("✏️ Non, je corrige", "prenom:non")))
+            return True
+        db.upsert_user(uid, prenom=prenom)
+
+    elif etape == "whatsapp":
+        numero = _valider_whatsapp(texte)
+        if not numero:
+            await ecrire(bot, uid, "Ce numéro ne semble pas valide 🤔\n\n"
+                                   "Envoie-le avec l'indicatif, ex : <b>+229 60619292</b>")
+            return True
+        db.upsert_user(uid, whatsapp=numero)
+
+    else:
+        return False
+
+    await poser_question(bot, uid)
+    return True
+
+
+async def confirmer_prenom(bot, uid, reponse) -> bool:
+    u = db.get_user(uid)
+    if not u or prochaine_etape(u) != "prenom":
+        return False
+    prenom = PRENOMS_A_CONFIRMER.pop(uid, None)
+    if reponse == "oui" and prenom:
+        db.upsert_user(uid, prenom=prenom)
+        await poser_question(bot, uid)
+    else:
+        await ecrire(bot, uid, "Pas de souci 😊 Envoie-moi juste ton prénom :")
+    return True
+
+
+async def repondre_bouton(bot, uid, data) -> bool:
+    """data = 'trade:Oui', 'frein:2', 'presence:deux', 'soir:1', 'confirme:1'.
+    N'est accepté que si ça correspond à la question en cours (anti double-clic, anciens boutons)."""
+    u = db.get_user(uid)
+    champ, _, valeur = data.partition(":")
+    if not u or inscrit(u) or prochaine_etape(u) != ("confirmation" if champ == "confirme" else champ):
+        return False
+
+    if champ == "trade":
+        db.upsert_user(uid, deja_trade=valeur)
+    elif champ == "frein":
+        db.upsert_user(uid, frein=FREINS[int(valeur)])
+    elif champ == "presence":
+        if valeur == "deux":
+            db.upsert_user(uid, presence="Les deux soirs", veut_j1=1, veut_j2=1)
+        else:
+            db.upsert_user(uid, presence="Un seul soir")
+    elif champ == "soir":
+        db.upsert_user(uid, veut_j1=int(valeur == "1"), veut_j2=int(valeur == "2"))
+    elif champ == "confirme":
+        db.upsert_user(uid, completed=1, en_cours=0)
+        await envoyer_confirmation(bot, uid)
+        return True
+
+    await poser_question(bot, uid)
+    return True
+
+
+async def gerer_souci(bot, uid):
+    """Bouton « Je suis bloqué(e) » : on donne le contact de l'admin et on met le questionnaire en pause
+    (plus aucune relance automatique pour cette personne)."""
+    db.upsert_user(uid, en_cours=0)
+    await ecrire(bot, uid,
+                 f"Pas de souci 🙏 Pour t'aider rapidement, contacte directement Charbel ici : {ADMIN_USERNAME}\n\n"
+                 "Quand tu es prêt(e) à reprendre, clique ici 👇",
+                 kb_demarrer("▶️ Reprendre mon inscription"))
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# CONFIRMATION : place confirmée → calendrier → lien du live
+# ════════════════════════════════════════════════════════════════════════════
+
+def _utc(jour):
+    """Début et fin du live en UTC (Bénin = UTC+1)."""
+    debut = debut_live(jour) - timedelta(hours=1)
+    return debut, debut + timedelta(hours=DUREE_LIVE)
+
+
+def lien_google_agenda(jour) -> str:
+    debut, fin = _utc(jour)
+    return "https://calendar.google.com/calendar/render?" + urlencode({
+        "action": "TEMPLATE",
+        "text": "Formation gratuite Trading Pour Tous",
+        "dates": f"{debut:%Y%m%dT%H%M%SZ}/{fin:%Y%m%dT%H%M%SZ}",
+        "details": f"Formation en direct (heure du Bénin).\n\nLien du direct : {JOURS[jour]['live']}",
+        "location": "En direct en ligne",
+    }, safe="/")
+
+
+def fichier_ics(jours) -> bytes:
+    """Fichier calendrier pour iPhone : un événement par soir choisi, avec le lien du live dedans."""
+    lignes = ["BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//Trading Pour Tous//FR", "CALSCALE:GREGORIAN"]
+    for j in jours:
+        debut, fin = _utc(j)
+        lignes += [
+            "BEGIN:VEVENT",
+            f"UID:tpt-{WEBINAIRE}-j{j}@tradingpourtous",
+            f"DTSTAMP:{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}",
+            f"DTSTART:{debut:%Y%m%dT%H%M%SZ}",
+            f"DTEND:{fin:%Y%m%dT%H%M%SZ}",
+            "SUMMARY:Formation gratuite Trading Pour Tous",
+            f"DESCRIPTION:Formation en direct (heure du Bénin).\\nLien du direct : {JOURS[j]['live']}",
+            "LOCATION:En direct en ligne",
+            f"URL:{JOURS[j]['live']}",
+            "BEGIN:VALARM", "TRIGGER:-PT30M", "ACTION:DISPLAY",
+            "DESCRIPTION:La formation commence dans 30 minutes", "END:VALARM",
+            "END:VEVENT",
+        ]
+    lignes.append("END:VCALENDAR")
+    return "\r\n".join(lignes).encode("utf-8")
+
+
+async def envoyer_confirmation(bot, uid):
+    u = db.get_user(uid)
+    jours = jours_choisis(u)
+    await ecrire(bot, uid, f"🎉 <b>C'est noté, {h(u['prenom'])} !</b>\n\n"
+                           f"Ta place est confirmée pour {dates_texte(jours)} à {HEURE_LIVE}h.")
+    await ecrire(bot, uid, "📅 Ajoute la formation à ton calendrier pour ne pas oublier :",
+                 kb(("🤖 Android — Google Agenda", "agenda:android"),
+                    ("🍎 iPhone — Fichier calendrier", "agenda:iphone")))
+    await ecrire(bot, uid,
+                 "🔴 Voici ton lien pour le direct — garde-le précieusement 👇\n\n"
+                 "Je te rappellerai ici même, en privé, la veille et le jour J. "
+                 f"À {JOURS[jours[0]]['semaine']} soir !",
+                 kb(*[(f"🔴 Live du {JOURS[j]['nom']}", f"live:{j}") for j in jours]))
+
+
+async def envoyer_agenda(bot, uid, plateforme):
+    """Clic sur un bouton calendrier : on note le clic, puis on envoie le lien (Android) ou le .ics (iPhone)."""
+    db.enregistrer_suivi(uid, f"agenda_{plateforme}")
+    jours = jours_choisis(db.get_user(uid))
+    if plateforme == "android":
+        bouton = InlineKeyboardMarkup([[InlineKeyboardButton("📅 Ajouter à Google Agenda",
+                                                              url=lien_google_agenda(jours[0]))]])
+        await ecrire(bot, uid, "Clique ici pour l'ajouter à ton agenda 👇", bouton)
+    else:
+        await bot.send_document(chat_id=uid, document=fichier_ics(jours), filename="formation-trading-pour-tous.ics",
+                                caption="📅 Ouvre ce fichier pour l'ajouter à ton calendrier iPhone.")
+
+
+async def envoyer_lien_live(bot, uid, jour):
+    """Clic sur « Rejoindre le live » : on note le clic (jour + heure), puis on envoie le vrai lien."""
+    db.enregistrer_suivi(uid, "live", jour)
+    bouton = InlineKeyboardMarkup([[InlineKeyboardButton("▶️ Ouvrir le live", url=JOURS[jour]["live"])]])
+    await ecrire(bot, uid, f"🔴 Voici ton lien pour le direct du {JOURS[jour]['nom']} 👇", bouton)
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# ARRIVÉE DANS LE CANAL ET /start
+# ════════════════════════════════════════════════════════════════════════════
+
+async def envoyer_bienvenue(bot, uid, lien_entree=None):
+    db.log_member(uid, lien_entree)
+    db.upsert_user(uid, categorie=db.derniere_categorie())
+
+    legende = (
+        "🚀 <b>Bienvenue dans Trading Pour Tous !</b>\n\n"
+        "Tu es sur le point de réserver ta place à la formation gratuite :\n"
+        "<b>« Trading Pour Tous »</b>\n\n"
+        f"📅 <b>{JOURS[1]['nom']} et {JOURS[2]['nom']} à {HEURE_LIVE}h00</b> (heure du Bénin)\n"
+        "🎥 En direct uniquement — places limitées")
+    await envoyer_video(bot, uid, VIDEO_BIENVENUE, legende, nom="welcomes_222", parse_mode="HTML")
+    await ecrire(bot, uid, "⚠️ <b>Il ne reste que peu de places</b>\n"
+                           "Les places s'envolent vite. Sécurise la tienne maintenant 👇",
+                 kb_demarrer())
+
+
+async def envoyer_bienvenue_securise(bot, uid, lien_entree=None):
     try:
-        await send_welcome_video(bot, user_id)
+        await envoyer_bienvenue(bot, uid, lien_entree)
     except Exception as e:
-        print(f"Erreur bienvenue uid={user_id} : {e}")
+        print(f"Erreur bienvenue uid={uid} : {e}")
 
 
-async def _reply_already_registered(bot, user_id: int):
-    await bot.send_message(
-        chat_id=user_id,
-        text=(
-            "✅ *Tu es déjà inscrit à la formation Trading Pour Tous*\n\n"
-            "Pas besoin de t'enregistrer une deuxième fois 😊\n\n"
-            "Rendez-vous les *2 et 3 septembre à 21h00* (heure du Bénin).\n\n"
-            "Tu recevras le lien du live et tous les rappels "
-            "par *WhatsApp et Telegram* avant l'événement.\n\n"
-            "Hâte de te voir en ligne 🔥"
-        ),
-        parse_mode="Markdown"
-    )
-
-
-# ════════════════════════════════════════════════════════════════════════════
-# ── HANDLERS ENTRÉE ──────────────────────────────────────────────────────────
-# ════════════════════════════════════════════════════════════════════════════
-
-async def _handle_join(bot, user_id: int):
+async def approuver_demande(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    demande = update.chat_join_request
+    uid = demande.from_user.id
     try:
-        await send_welcome_video(bot, user_id)
+        await demande.approve()
     except Exception as e:
-        print(f"Erreur join uid={user_id} : {e}")
+        print(f"approve() uid={uid} : {e}")
+    lien = demande.invite_link          # nommer les liens A, B, C dans Telegram : le nom est gardé en base
+    nom_lien = (lien.name or lien.invite_link) if lien else None
+    lancer(envoyer_bienvenue_securise(ctx.bot, uid, nom_lien))
 
 
-async def approve_join_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.chat_join_request.from_user.id
-    try:
-        await update.chat_join_request.approve()
-    except Exception as e:
-        print(f"approve() uid={user_id} : {e}")
+async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    db.touch_last_seen(uid)
+    if inscrit(db.get_user(uid)):
+        await message_deja_inscrit(ctx.bot, uid)
+    else:
+        lancer(envoyer_bienvenue_securise(ctx.bot, uid))
 
-    asyncio.create_task(_handle_join(context.bot, user_id))
 
-
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    args    = context.args
-
-    if args and args[0] == "JeMenregistre":
-        await update.message.reply_text(
-            "Super 🎉 Clique sur /JeMEnregistre pour t'inscrire à la formation.",
-            parse_mode="Markdown"
-        )
-        return
-
-    _touch_last_seen(user_id)
-    if _is_already_registered(user_id):
-        await _reply_already_registered(context.bot, user_id)
-        return
-    asyncio.create_task(_send_welcome_safe(context.bot, user_id))
+async def cmd_inscription(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    db.touch_last_seen(update.effective_user.id)
+    await demarrer_questionnaire(ctx.bot, update.effective_user.id)
 
 
 # ════════════════════════════════════════════════════════════════════════════
-# ── MESSAGES LIBRES → REDIRECTION ADMIN ──────────────────────────────────────
+# BOUTONS (un seul routeur)
 # ════════════════════════════════════════════════════════════════════════════
 
-async def message_libre(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def boutons(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    uid, bot = q.from_user.id, ctx.bot
+    db.touch_last_seen(uid)
+    action, _, reste = q.data.partition(":")
+
+    accepte = None
+    if action == "q":
+        accepte = await repondre_bouton(bot, uid, reste)
+    elif action == "prenom":
+        accepte = await confirmer_prenom(bot, uid, reste)
+    elif action == "live":
+        await envoyer_lien_live(bot, uid, int(reste))
+    elif action == "agenda":
+        await envoyer_agenda(bot, uid, reste)
+    elif action == "demarrer":
+        await demarrer_questionnaire(bot, uid)
+    elif action == "souci":
+        await gerer_souci(bot, uid)
+
+    if accepte:                          # on retire les boutons d'une question déjà répondue
+        try:
+            await q.edit_message_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# MESSAGES LIBRES ET CODES DU SOIR
+# ════════════════════════════════════════════════════════════════════════════
+
+def normaliser(texte) -> str:
+    """'  Nasdaq ! ' -> 'NASDAQ' (sans accents, sans ponctuation)."""
+    texte = unicodedata.normalize("NFKD", texte)
+    texte = "".join(c for c in texte if not unicodedata.combining(c))
+    return re.sub(r"[^A-Z0-9]", "", texte.upper())
+
+
+async def traiter_code(bot, uid, texte, jour_actuel=None) -> bool:
+    """Le message est-il l'un des codes du soir ? Si oui on l'enregistre (qui + quelle heure)."""
+    trouves = db.trouver_code(normaliser(texte))
+    if not trouves:
+        return False
+    jour_actuel = jour_actuel or jour_courant()
+    jour, rang = next(((j, r) for j, r in trouves if j == jour_actuel), trouves[0])
+    db.enregistrer_suivi(uid, "code", jour, str(rang))
+    prenom = (db.get_user(uid) or {}).get("prenom") or ""
+    await ecrire(bot, uid, f"✅ Code reçu {h(prenom)} ! Merci d'être en direct 🔥")
+    return True
+
+
+async def message_libre(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.text:
         return
+    user, bot = update.effective_user, ctx.bot
+    uid, brut = user.id, update.message.text
+    db.touch_last_seen(uid)
 
-    user    = update.effective_user
-    user_id = user.id
-    texte   = update.message.text.lower().strip()
+    if await traiter_code(bot, uid, brut):           # 1. code du soir
+        return
+    if await repondre_texte(bot, uid, brut):         # 2. réponse au questionnaire
+        return
 
-    _touch_last_seen(user_id)
-    _log_message(user_id, texte)
-
+    db.log_message(uid, brut)                        # 3. message libre → on prévient l'admin
+    texte = brut.lower().strip()
     if "present" in texte or "présent" in texte:
-        reponse = (
-            "Je suis très content de savoir que tu seras là !\n\n"
-            "N'oublie pas, c'est les 2 et 3 septembre à 21h heure de Cotonou.\n\n"
-            "Je t'enverrai le lien du live juste avant, ici et sur WhatsApp si possible."
-        )
-        await update.message.reply_text(reponse)
+        u = db.get_user(uid)
+        reponse = ("Je suis très content de savoir que tu seras là !\n\n"
+                   f"N'oublie pas : {dates_texte(jours_choisis(u))} à {HEURE_LIVE}h, heure de Cotonou.\n\n"
+                   "Je t'enverrai ton lien ici, en privé, juste avant le live.")
     elif "merci" in texte:
-        await update.message.reply_text("jtp !")
+        reponse = "jtp !"
     elif "ok" in texte:
-        await update.message.reply_text("Super !")
+        reponse = "Super !"
     else:
-        await update.message.reply_text(
-            "Ton message a bien été reçu.\n\n"
-            f"Pour une réponse rapide, contacte directement "
-            f"Charbel sur Telegram : {ADMIN_USERNAME}\n\n"
-            "Il te répondra dès que possible."
-        )
+        reponse = ("Ton message a bien été reçu.\n\n"
+                   f"Pour une réponse rapide, contacte directement Charbel sur Telegram : {ADMIN_USERNAME}\n\n"
+                   "Il te répondra dès que possible.")
+    await update.message.reply_text(reponse)
 
-    username      = f"@{user.username}" if user.username else f"id:{user_id}"
-    prenom_tg     = user.first_name or ""
-    texte_affiche = update.message.text[:200]
-
-    notif = (
-        f"Nouveau message reçu\n\n"
-        f"Utilisateur : {prenom_tg} ({username})\n"
-        f"ID : {user_id}\n\n"
-        f"Message : {texte_affiche}"
-    )
-    for admin_id in ADMIN_IDS:
-        try:
-            await context.bot.send_message(chat_id=admin_id, text=notif)
-        except Exception as e:
-            print(f"Notif admin {admin_id} : {e}")
+    pseudo = f"@{user.username}" if user.username else f"id:{uid}"
+    await prevenir_admins(bot, f"Nouveau message reçu\n\nUtilisateur : {user.first_name or ''} ({pseudo})\n"
+                               f"ID : {uid}\n\nMessage : {brut[:200]}")
 
 
 # ════════════════════════════════════════════════════════════════════════════
-# ── RELANCE INSCRIPTIONS INCOMPLÈTES ─────────────────────────────────────────
+# CIBLES (utilisées par /envoyer, /export et les rappels)
 # ════════════════════════════════════════════════════════════════════════════
 
-async def relancer(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id not in ADMIN_IDS:
-        await update.message.reply_text("⛔ Commande réservée à l'administrateur.")
-        return
-
-    users = _get_incomplete_users()
-    if not users:
-        await update.message.reply_text("✅ Aucune inscription incomplète à relancer.")
-        return
-
-    await update.message.reply_text(
-        f"📤 Relance en cours pour *{len(users)}* utilisateurs...",
-        parse_mode="Markdown"
-    )
-    asyncio.create_task(_broadcast_relance(context.bot, update.effective_user.id, users))
+def _incomplets():
+    confirmes = set(db.ids_confirmes(WEBINAIRE))
+    return [i for i in db.ids_tous() if i not in confirmes]
 
 
-async def _broadcast_relance(bot, admin_id: int, users: list[dict]):
-    sent = blocked = erreurs = 0
-
-    for u in users:
-        uid    = u["telegram_id"]
-        prenom = u["prenom"] or "Hello l'ami"
-        try:
-            await bot.send_message(
-                chat_id=uid,
-                text=(
-                    f"⚠️ *{prenom}, ton inscription n'a pas encore été validée*\n\n"
-                    "Tu as commencé à t'inscrire à la formation gratuite "
-                    "*Trading Pour Tous* (2 et 3 septembre à 21h), "
-                    "mais tu n'as pas finalisé ta demande.\n\n"
-                    "Il ne reste que peu de places et elles partent vite.\n\n"
-                    "Clique sur le bouton ci-dessous pour sécuriser ta place :"
-                ),
-                parse_mode="Markdown",
-                reply_markup=kb_relance()
-            )
-            sent += 1
-        except Exception as e:
-            err = str(e)
-            if "Forbidden" in err or "blocked" in err.lower():
-                blocked += 1
-            elif "can't initiate" in err:
-                erreurs += 1
-            else:
-                erreurs += 1
-                print(f"Relance uid={uid} : {e}")
-
-        await asyncio.sleep(0.1)
-
-    await bot.send_message(
-        admin_id,
-        f"Relance terminée\n\n"
-        f"*{sent}* envoyés\n"
-        f"*{blocked}* ont bloqué le bot\n"
-        f"*{erreurs}* autres erreurs\n"
-        f"Total ciblé : *{len(users)}*",
-        parse_mode="Markdown"
-    )
+def _presents(jour):
+    presents = set(db.ids_presents(jour, SEUILS[jour]))
+    return [i for i in db.ids_confirmes(WEBINAIRE, jour) if i in presents]
 
 
-async def relance_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    texte_reponse = "Super 🎉 Clique sur /JeMEnregistre pour finaliser ton inscription."
-    if query.message:
-        await query.message.reply_text(texte_reponse, parse_mode="Markdown")
-    else:
-        await context.bot.send_message(
-            chat_id=query.from_user.id,
-            text=texte_reponse,
-            parse_mode="Markdown"
-        )
+def _absents(jour):
+    presents = set(db.ids_presents(jour, SEUILS[jour]))
+    return [i for i in db.ids_confirmes(WEBINAIRE, jour) if i not in presents]
 
 
-# ════════════════════════════════════════════════════════════════════════════
-# ── GESTION DES CATÉGORIES ────────────────────────────────────────────────────
-# ════════════════════════════════════════════════════════════════════════════
-
-async def nouvelle_categorie_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id not in ADMIN_IDS:
-        await update.message.reply_text("⛔ Commande réservée à l'administrateur.")
-        return ConversationHandler.END
-
-    cats  = _get_categories()
-    liste = "\n".join(f"• {c}" for c in cats) if cats else "_(aucune pour l'instant)_"
-    await update.message.reply_text(
-        f"*Catégories actuelles :*\n\n{liste}\n\n"
-        "Envoie le *nom* du nouvel événement à créer :",
-        parse_mode="Markdown"
-    )
-    return CAT_NOM
-
-
-async def nouvelle_categorie_nom(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    nom = update.message.text.strip()
-    if len(nom) < 3:
-        await update.message.reply_text("❌ Nom trop court (min 3 caractères). Réessaie :")
-        return CAT_NOM
-    _ajouter_categorie(nom)
-    await update.message.reply_text(
-        f"✅ Catégorie *{nom}* créée avec succès.",
-        parse_mode="Markdown"
-    )
-    return ConversationHandler.END
-
-
-async def nouvelle_categorie_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("❌ Création annulée.")
-    return ConversationHandler.END
-
-
-# ════════════════════════════════════════════════════════════════════════════
-# ── BROADCAST AVEC CIBLAGE ───────────────────────────────────────────────────
-# ════════════════════════════════════════════════════════════════════════════
-
-# Map cible → (filter_type, filter_value, libellé humain)
+# clé -> (libellé, fonction qui retourne la liste des identifiants)
 CIBLES = {
-    "1":  ("all",         None,                                       "Tous les utilisateurs"),
-    "2":  ("complets",    None,                                       "Inscrits complets uniquement"),
-    "3":  ("incomplets",  None,                                       "Inscriptions incomplètes"),
-    "4":  ("presence",    "Oui, les deux jours",                      "Présents les 2 jours"),
-    "5":  ("presence",    "Un seul des deux jours",                   "Présents un seul jour"),
-    "6":  ("frein",       "Le manque de temps",                       "Frein : manque de temps"),
-    "7":  ("frein",       "La peur de perdre de l'argent",            "Frein : peur de perdre"),
-    "8":  ("frein",       "Je ne sais pas par où commencer",          "Frein : ne sait pas commencer"),
-    "9":  ("frein",       "Autre",                                    "Frein : autre"),
-    "10": ("deja_trade",  "Oui",                                      "Ont déjà tradé"),
-    "11": ("deja_trade",  "Non",                                      "N'ont jamais tradé (débutants)"),
-    "12": ("interet",     "Un revenu complémentaire",                 "Intérêt : revenu complémentaire"),
-    "13": ("interet",     "Apprendre une nouvelle compétence",        "Intérêt : nouvelle compétence"),
-    "14": ("interet",     "L'indépendance financière",                "Intérêt : indépendance"),
-    "15": ("interet",     "Autre",                                    "Intérêt : autre"),
+    "tous":         ("Tous (canal + bot)",                    db.ids_tous),
+    "confirmes":    ("Confirmés",                             lambda: db.ids_confirmes(WEBINAIRE)),
+    "incomplets":   ("Incomplets (pas confirmés)",            _incomplets),
+    "sept":         ("Anciens inscrits de septembre",         db.ids_septembre),
+    "j1":           (f"Confirmés pour le {JOURS[1]['nom']}",  lambda: db.ids_confirmes(WEBINAIRE, 1)),
+    "j2":           (f"Confirmés pour le {JOURS[2]['nom']}",  lambda: db.ids_confirmes(WEBINAIRE, 2)),
+    "presents_1":   (f"Présents le {JOURS[1]['nom']}",        lambda: _presents(1)),
+    "absents_1":    (f"Absents le {JOURS[1]['nom']}",         lambda: _absents(1)),
+    "presents_2":   (f"Présents le {JOURS[2]['nom']}",        lambda: _presents(2)),
+    "absents_2":    (f"Absents le {JOURS[2]['nom']}",         lambda: _absents(2)),
+    "debutants":    ("Débutants (jamais tradé)",              lambda: db.ids_confirmes(WEBINAIRE, champ="deja_trade", valeur="Non")),
+    "traders":      ("Ont déjà tradé",                        lambda: db.ids_confirmes(WEBINAIRE, champ="deja_trade", valeur="Oui")),
+    "un_seul_soir": ("Un seul soir",                          lambda: db.ids_confirmes(WEBINAIRE, champ="presence", valeur="Un seul soir")),
 }
+for _i, _frein in enumerate(FREINS):
+    CIBLES[f"frein_{_i}"] = (f"Frein : {_frein}",
+                             lambda f=_frein: db.ids_confirmes(WEBINAIRE, champ="frein", valeur=f))
 
 
-async def _broadcast_targeted(bot, admin_id: int, data: dict):
-    filter_type  = data["filter_type"]
-    filter_value = data["filter_value"]
-    libelle      = data["libelle"]
-    fmt          = data.get("format")
-    texte        = data.get("text_content", "")
-    media_id     = data.get("media_file_id")
+# ════════════════════════════════════════════════════════════════════════════
+# RAPPELS PLANIFIÉS (modifiables par l'admin) + RELANCES AUTOMATIQUES
+# ════════════════════════════════════════════════════════════════════════════
 
-    user_ids = _get_users_by_filter(filter_type, filter_value)
-    total    = len(user_ids)
+# (heure, texte) — {prenom} est remplacé par le prénom. Le bouton « Rejoindre le live » est ajouté à chaque message.
+SEQUENCE_SOIR = [
+    ("12:00", "{prenom}, ce soir à 21h. Ton lien est déjà là 👇"),
+    ("18:00", "Dans 3 heures. Charge ton téléphone 🔋"),
+    ("20:30", "Dans 30 minutes. Connecte-toi maintenant 👇"),
+    ("21:05", "On a commencé. Plus d'une centaine de personnes sont déjà là 🔥"),
+]
 
-    if total == 0:
-        await bot.send_message(admin_id, f"❌ Aucun utilisateur dans la cible : *{libelle}*.", parse_mode="Markdown")
-        return
-    if fmt in {"2", "3", "4", "5"} and not media_id:
-        await bot.send_message(admin_id, "❌ Fichier média manquant. Diffusion annulée.")
-        return
-
-    est = round(total * 0.1 / 60, 2)
-    await bot.send_message(admin_id,
-        f"📤 Envoi en cours\nCible : *{libelle}*\nDestinataires : *{total}*\nEstimé : {est} min",
-        parse_mode="Markdown")
-
-    sent = 0
-    for idx, uid in enumerate(user_ids, start=1):
-        try:
-            if fmt == "1":   await bot.send_message(chat_id=uid, text=texte)
-            elif fmt == "2": await bot.send_photo(chat_id=uid, photo=media_id, caption=texte)
-            elif fmt == "3": await bot.send_video(chat_id=uid, video=media_id, caption=texte)
-            elif fmt == "4": await bot.send_photo(chat_id=uid, photo=media_id)
-            elif fmt == "5": await bot.send_video(chat_id=uid, video=media_id)
-            sent += 1
-        except Exception as e:
-            print(f"Broadcast uid={uid} : {e}")
-
-        if   total >= 3 and idx == total // 3:
-            await bot.send_message(admin_id, "1/3 des messages envoyés")
-        elif total >= 3 and idx == (2*total) // 3:
-            await bot.send_message(admin_id, "2/3 des messages envoyés")
-        elif idx == total:
-            await bot.send_message(admin_id,
-                f"Diffusion terminée — *{sent}/{total}* messages envoyés à *{libelle}*",
-                parse_mode="Markdown")
-
-        await asyncio.sleep(0.1)
+# (nom, cible, date d'envoi, texte, vidéo, bouton)  — bouton : "live_1" / "live_2" / "demarrer" / ""
+PLANNING = [
+    ("Réinvitation septembre", "sept", "2026-09-25 12:00:00",
+     "{prenom}, la formation gratuite revient : mercredi 30 septembre et jeudi 1er octobre, 21h.\n\n"
+     "Tu avais réservé ta place en septembre — elle t'attend toujours.\n\nConfirme-la ici 👇",
+     "", "demarrer"),
+    ("Veille J1 (vidéo)", "j1", "2026-09-29 20:00:00",
+     "Demain soir, 21h. Voilà ce que tu vas voir.", "29.mp4", "live_1"),
+    ("Fin J1 → demain", "confirmes", "2026-09-30 23:15:00",
+     f"Demain, je montre [{A_COMPLETER}]. Même heure, même lien.", "", "live_2"),
+    ("Absents J1 (replay)", "absents_1", "2026-09-30 23:45:00",
+     f"[{A_COMPLETER}] texte replay + relance", "", ""),
+    ("Présents J1 (offre)", "presents_1", "2026-09-30 23:45:00",
+     f"[{A_COMPLETER}] texte de l'offre", "", ""),
+    ("Absents J2 (replay)", "absents_2", "2026-10-01 23:45:00",
+     f"[{A_COMPLETER}] texte replay + relance", "", ""),
+    ("Présents J2 (offre)", "presents_2", "2026-10-01 23:45:00",
+     f"[{A_COMPLETER}] texte de l'offre", "", ""),
+]
+for _jour, _infos in JOURS.items():
+    for _heure, _texte in SEQUENCE_SOIR:
+        PLANNING.append((f"J{_jour} {_heure}", f"j{_jour}", f"{_infos['date']} {_heure}:00",
+                         _texte, "", f"live_{_jour}"))
+PLANNING.sort(key=lambda r: r[2])
 
 
-async def bc_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id not in ADMIN_IDS:
-        await update.message.reply_text("⛔ Commande réservée à l'administrateur.")
-        return ConversationHandler.END
-
-    lignes = ["*Choisis la cible du message :*\n"]
-    for num, (_, _, libelle) in CIBLES.items():
-        # Affiche aussi le nombre approximatif
-        ftype, fval, _ = CIBLES[num]
-        try:
-            nb = len(_get_users_by_filter(ftype, fval))
-        except Exception:
-            nb = "?"
-        lignes.append(f"*{num}* — {libelle} _({nb})_")
-
-    lignes.append("\n_Réponds avec le numéro de la cible (ex : 4)_")
-    await update.message.reply_text(
-        "\n".join(lignes),
-        parse_mode="Markdown",
-        reply_markup=ReplyKeyboardRemove()
-    )
-    return BC_CIBLE
+def clavier_rappel(bouton):
+    if bouton.startswith("live_"):
+        return kb(("🔴 Rejoindre le live", f"live:{bouton[5:]}"))
+    if bouton == "demarrer":
+        return kb_demarrer()
+    return None
 
 
-async def bc_get_cible(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    choix = update.message.text.strip()
-    if choix not in CIBLES:
-        await update.message.reply_text(
-            f"❌ Numéro invalide. Réponds avec un nombre entre 1 et {len(CIBLES)}."
-        )
-        return BC_CIBLE
-
-    ftype, fval, libelle = CIBLES[choix]
-    context.user_data["bc_filter_type"]  = ftype
-    context.user_data["bc_filter_value"] = fval
-    context.user_data["bc_libelle"]      = libelle
-
-    await update.message.reply_text(
-        f"✅ Cible sélectionnée : *{libelle}*\n\n"
-        "*Format du message à diffuser :*\n\n"
-        "1 — Texte seul\n"
-        "2 — Image + texte\n"
-        "3 — Vidéo + texte\n"
-        "4 — Image seule\n"
-        "5 — Vidéo seule\n\n"
-        "_(max 4096 caractères)_",
-        parse_mode="Markdown"
-    )
-    return BC_FORMAT
-
-
-async def bc_get_format(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    choix = update.message.text.strip()[0]
-    if choix not in {"1", "2", "3", "4", "5"}:
-        await update.message.reply_text("❌ Chiffre entre 1 et 5 uniquement.")
-        return BC_FORMAT
-    context.user_data["bc_format"] = choix
-    if choix in {"2", "3"}:
-        await update.message.reply_text(f"Envoie ton fichier {'image' if choix=='2' else 'vidéo'}.")
-        return BC_MEDIA
-    await update.message.reply_text(
-        "Envoie maintenant ton texte." if choix == "1" else "Envoie ton fichier."
-    )
-    return BC_TEXT
-
-
-async def bc_get_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    choix = context.user_data["bc_format"]
-    if choix == "2":
-        if not update.message.photo:
-            await update.message.reply_text("❌ Ce n'est pas une image. Réessaie.")
-            return BC_MEDIA
-        context.user_data["bc_media_id"] = update.message.photo[-1].file_id
-    elif choix == "3":
-        if not update.message.video:
-            await update.message.reply_text("❌ Ce n'est pas une vidéo. Réessaie.")
-            return BC_MEDIA
-        context.user_data["bc_media_id"] = update.message.video.file_id
-    await update.message.reply_text("Envoie maintenant le texte associé.")
-    return BC_TEXT
-
-
-async def bc_get_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    admin_id = update.effective_user.id
-    choix    = context.user_data["bc_format"]
-    if choix == "4":
-        if not update.message.photo:
-            await update.message.reply_text("❌ Ce n'est pas une image.")
-            return BC_TEXT
-        context.user_data["bc_media_id"] = update.message.photo[-1].file_id
-        context.user_data["bc_text"]     = ""
-    elif choix == "5":
-        if not update.message.video:
-            await update.message.reply_text("❌ Ce n'est pas une vidéo.")
-            return BC_TEXT
-        context.user_data["bc_media_id"] = update.message.video.file_id
-        context.user_data["bc_text"]     = ""
+async def envoyer_a(bot, uid, texte, video, markup):
+    """Un message de rappel, en texte brut (le texte écrit par l'admin n'est jamais interprété)."""
+    prenom = (db.get_user(uid) or {}).get("prenom") or "Hello"
+    texte = texte.replace("{prenom}", prenom)
+    if video:
+        await envoyer_video(bot, uid, video, texte, markup)
     else:
-        if not update.message.text:
-            await update.message.reply_text("❌ Merci d'envoyer du texte.")
-            return BC_TEXT
-        context.user_data["bc_text"] = update.message.text
-
-    await update.message.reply_text("Diffusion lancée en arrière-plan...")
-    asyncio.create_task(_broadcast_targeted(context.bot, admin_id, {
-        "filter_type":   context.user_data["bc_filter_type"],
-        "filter_value":  context.user_data["bc_filter_value"],
-        "libelle":       context.user_data["bc_libelle"],
-        "format":        choix,
-        "text_content":  context.user_data.get("bc_text", ""),
-        "media_file_id": context.user_data.get("bc_media_id"),
-    }))
-    return ConversationHandler.END
+        await bot.send_message(chat_id=uid, text=texte, reply_markup=markup)
 
 
-async def bc_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("❌ Diffusion annulée.")
-    return ConversationHandler.END
+async def envoyer_rappel(bot, rappel):
+    ids = CIBLES[rappel["cible"]][1]()
+    markup = clavier_rappel(rappel["bouton"])
+    ok = erreurs = 0
+    for uid in ids:
+        try:
+            await envoyer_a(bot, uid, rappel["texte"], rappel["video"], markup)
+            ok += 1
+        except Exception as e:
+            erreurs += 1
+            print(f"Rappel #{rappel['id']} uid={uid} : {e}")
+        await asyncio.sleep(PAUSE_ENVOI)
+    await prevenir_admins(bot, f"✅ Rappel #{rappel['id']} « {rappel['nom']} » : "
+                               f"{ok}/{len(ids)} envoyés ({erreurs} échecs : bot bloqué, etc.)")
+
+
+async def envoyer_relance(bot, u, colonne):
+    """+10 min : texte. +30 min : même texte avec la vidéo de bienvenue."""
+    n = restantes(u)
+    reste = ("il ne te reste qu'un clic pour confirmer ta place" if n == 0
+             else f"il te reste {n} question{'s' if n > 1 else ''} pour confirmer ta place")
+    texte = f"{u.get('prenom') or 'Hello'}, {reste}.\n\nOù est-ce que tu bloques ? 👇"
+    markup = kb(("▶️ Je continue", "demarrer"), ("🆘 Je suis bloqué(e)", "souci"))
+    if colonne == "relance30":
+        await envoyer_video(bot, u["telegram_id"], VIDEO_RELANCE, texte, markup)
+    else:
+        await bot.send_message(chat_id=u["telegram_id"], text=texte, reply_markup=markup)
+
+
+async def relancer_incomplets(bot, maintenant):
+    for colonne, minutes in (("relance10", 10), ("relance30", 30)):
+        for u in db.users_a_relancer(WEBINAIRE, colonne, maintenant - timedelta(minutes=minutes)):
+            db.marquer_relance(u["telegram_id"], colonne)          # d'abord : jamais deux envois
+            try:
+                await envoyer_relance(bot, u, colonne)
+            except Exception as e:
+                print(f"Relance uid={u['telegram_id']} : {e}")
+            await asyncio.sleep(PAUSE_ENVOI)
+
+
+async def tick(bot, maintenant=None):
+    """Appelée toutes les 30 s : envoie les rappels dont l'heure est arrivée, puis les relances."""
+    maintenant = maintenant or db.now_benin()
+    for r in db.rappels_a_traiter(maintenant.strftime(FORMAT)):
+        retard = maintenant - datetime.strptime(r["date_envoi"], FORMAT)
+        if retard > TOLERANCE:
+            db.set_statut_rappel(r["id"], db.MANQUE)
+            await prevenir_admins(bot, f"⚠️ Rappel #{r['id']} « {r['nom']} » NON envoyé (heure dépassée de "
+                                       f"{int(retard.total_seconds() // 60)} min). Pour l'envoyer quand même : "
+                                       f"/envoyer_rappel {r['id']} oui")
+        elif A_COMPLETER in r["texte"].upper():
+            db.set_statut_rappel(r["id"], db.MANQUE)
+            await prevenir_admins(bot, f"⚠️ Rappel #{r['id']} « {r['nom']} » NON envoyé : texte pas complété. "
+                                       f"Écris-le avec /modifier {r['id']} ton texte, puis /envoyer_rappel {r['id']} oui")
+        else:
+            db.set_statut_rappel(r["id"], db.ENVOYE)
+            await envoyer_rappel(bot, r)
+    await relancer_incomplets(bot, maintenant)
+
+
+async def boucle_planificateur(bot):
+    while True:
+        try:
+            await tick(bot)
+        except Exception as e:
+            print(f"Planificateur : {e}")
+        await asyncio.sleep(30)
+
+
+async def demarrer_planificateur(app: Application):
+    lancer(boucle_planificateur(app.bot))
 
 
 # ════════════════════════════════════════════════════════════════════════════
-# ── /stats ────────────────────────────────────────────────────────────────────
+# COMMANDES ADMIN — rappels et codes
 # ════════════════════════════════════════════════════════════════════════════
 
-async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id not in ADMIN_IDS:
-        await update.message.reply_text("⛔ Commande réservée à l'administrateur.")
-        return
-
-    with db() as conn:
-        total    = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
-        complets = conn.execute("SELECT COUNT(*) FROM users WHERE completed=1").fetchone()[0]
-        try:
-            members = conn.execute("SELECT COUNT(*) FROM members_log").fetchone()[0]
-        except Exception:
-            members = "—"
-        try:
-            msgs = conn.execute("SELECT COUNT(*) FROM messages_libres").fetchone()[0]
-        except Exception:
-            msgs = "—"
-
-        # Stats par présence
-        try:
-            pres_deux = conn.execute(
-                "SELECT COUNT(*) FROM users WHERE presence=? AND completed=1",
-                ("Oui, les deux jours",)
-            ).fetchone()[0]
-            pres_un   = conn.execute(
-                "SELECT COUNT(*) FROM users WHERE presence=? AND completed=1",
-                ("Un seul des deux jours",)
-            ).fetchone()[0]
-        except Exception:
-            pres_deux = pres_un = "—"
-
-        # Stats par frein
-        try:
-            freins = conn.execute(
-                "SELECT frein, COUNT(*) as n FROM users WHERE completed=1 AND frein IS NOT NULL GROUP BY frein"
-            ).fetchall()
-            freins_txt = "\n".join(f"  • {r['frein']} : *{r['n']}*" for r in freins) or "  _(aucun)_"
-        except Exception:
-            freins_txt = "—"
-
-        # Débutants vs traders
-        try:
-            debutants = conn.execute(
-                "SELECT COUNT(*) FROM users WHERE deja_trade='Non' AND completed=1"
-            ).fetchone()[0]
-            experimentes = conn.execute(
-                "SELECT COUNT(*) FROM users WHERE deja_trade='Oui' AND completed=1"
-            ).fetchone()[0]
-        except Exception:
-            debutants = experimentes = "—"
-
-        try:
-            nb_sondages = conn.execute("SELECT COUNT(*) FROM sondages WHERE actif=1").fetchone()[0]
-            nb_votes    = conn.execute("SELECT COUNT(*) FROM sondage_reponses").fetchone()[0]
-        except Exception:
-            nb_sondages = "—"
-            nb_votes    = "—"
-
+@admin_seulement
+async def cmd_aide(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        f"*Statistiques Trading Pour Tous :*\n\n"
-        f"👥 Membres canal : *{members}*\n\n"
-        f"📝 Formulaire démarré : *{total}*\n"
-        f"✅ Inscriptions complètes : *{complets}*\n"
-        f"⏳ En cours : *{total - complets}*\n\n"
-        f"*Présence :*\n"
-        f"  • Les 2 jours : *{pres_deux}*\n"
-        f"  • Un seul jour : *{pres_un}*\n\n"
-        f"*Expérience :*\n"
-        f"  • Débutants : *{debutants}*\n"
-        f"  • Ont déjà tradé : *{experimentes}*\n\n"
-        f"*Freins :*\n{freins_txt}\n\n"
-        f"💬 Messages libres reçus : *{msgs}*\n\n"
-        f"📊 Sondages actifs : *{nb_sondages}*\n"
-        f"🗳️ Votes enregistrés : *{nb_votes}*",
-        parse_mode="Markdown"
-    )
+        "Commandes admin :\n\n"
+        "/rappels — liste des messages planifiés\n"
+        "/modifier <n°> <texte> — changer le texte d'un rappel ({prenom} = prénom)\n"
+        "/tester_rappel <n°> — recevoir le rappel chez toi pour vérifier\n"
+        "/envoyer_rappel <n°> oui — l'envoyer maintenant à sa cible\n"
+        "/codes 1 NASDAQ OR BTC — définir les 3 codes du soir 1 (ou 2)\n"
+        "/envoyer — diffuser un message à une cible\n"
+        "/export — exporter un tableau Excel (tu choisis la cible)\n"
+        "/stats — statistiques\n"
+        "/nouvelle_categorie <nom>")
 
 
-# ════════════════════════════════════════════════════════════════════════════
-# ── EXPORT EXCEL ──────────────────────────────────────────────────────────────
-# ════════════════════════════════════════════════════════════════════════════
+@admin_seulement
+async def cmd_rappels(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    icones = {db.PLANIFIE: "⏳", db.ENVOYE: "✅", db.MANQUE: "⚠️"}
+    lignes = []
+    for r in db.get_rappels():
+        date = datetime.strptime(r["date_envoi"], FORMAT).strftime("%d/%m %H:%M")
+        extrait = r["texte"].replace("\n", " ")[:55]
+        lignes.append(f"{icones[r['statut']]} #{r['id']} · {date} · {r['cible']}\n      {extrait}")
+    await update.message.reply_text("⏳ planifié · ✅ envoyé · ⚠️ non envoyé\n\n" + "\n".join(lignes))
 
-async def export_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id not in ADMIN_IDS:
-        await update.message.reply_text("Commande réservée à l'administrateur.")
+
+@admin_seulement
+async def cmd_modifier(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    parties = update.message.text.split(maxsplit=2)
+    if len(parties) < 3 or not parties[1].isdigit() or not db.get_rappel(int(parties[1])):
+        await update.message.reply_text("Usage : /modifier <n°> <nouveau texte>\nEx : /modifier 3 Ce soir 21h !")
         return
+    db.modifier_texte_rappel(int(parties[1]), parties[2])
+    await update.message.reply_text(f"✅ Rappel #{parties[1]} mis à jour. Vérifie avec /tester_rappel {parties[1]}")
 
-    await update.message.reply_text("Génération du fichier Excel en cours...")
 
-    try:
-        import openpyxl
-        from openpyxl.styles import Font, PatternFill, Alignment
-        import io
+@admin_seulement
+async def cmd_tester_rappel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    rappel = ctx.args and ctx.args[0].isdigit() and db.get_rappel(int(ctx.args[0]))
+    if not rappel:
+        await update.message.reply_text("Usage : /tester_rappel <n°>")
+        return
+    await update.message.reply_text(f"Aperçu du rappel #{rappel['id']} (cible : {rappel['cible']}) :")
+    await envoyer_a(ctx.bot, update.effective_user.id, rappel["texte"], rappel["video"],
+                    clavier_rappel(rappel["bouton"]))
 
-        with db() as conn:
-            rows = conn.execute("""
-                SELECT
-                    m.telegram_id,
-                    m.joined_at,
-                    u.prenom,
-                    u.whatsapp,
-                    u.pays,
-                    u.deja_trade,
-                    u.interet,
-                    u.presence,
-                    u.frein,
-                    u.level,
-                    u.objectif,
-                    u.email,
-                    u.categorie,
-                    CASE WHEN u.completed = 1 THEN 'Oui' ELSE 'Non' END AS complet,
-                    u.last_seen
-                FROM members_log m
-                LEFT JOIN users u ON u.telegram_id = m.telegram_id
-                ORDER BY m.joined_at DESC
-            """).fetchall()
 
-        wb = openpyxl.Workbook()
-        ws = wb.active
-        ws.title = "Trading Pour Tous"
+@admin_seulement
+async def cmd_envoyer_rappel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    rappel = ctx.args and ctx.args[0].isdigit() and db.get_rappel(int(ctx.args[0]))
+    if not rappel or ctx.args[1:] != ["oui"]:
+        await update.message.reply_text("Usage : /envoyer_rappel <n°> oui")
+        return
+    db.set_statut_rappel(rappel["id"], db.ENVOYE)
+    await update.message.reply_text(f"📤 Envoi du rappel #{rappel['id']} lancé…")
+    lancer(envoyer_rappel(ctx.bot, rappel))
 
-        headers = [
-            "ID Telegram", "Date arrivée", "Prénom", "WhatsApp", "Pays",
-            "Déjà tradé", "Intérêt principal", "Présence 2+3 sept", "Frein principal",
-            "Niveau (ancien)", "Objectif (ancien)", "Email (ancien)",
-            "Catégorie", "Inscription complète", "Dernière activité"
-        ]
-        header_fill = PatternFill("solid", fgColor="1F4E79")
-        header_font = Font(bold=True, color="FFFFFF")
 
-        # Colonnes clés à mettre en évidence pour Charbel (présence + frein)
-        highlight_fill = PatternFill("solid", fgColor="FFD966")
-
-        for col, h in enumerate(headers, start=1):
-            cell = ws.cell(row=1, column=col, value=h)
-            cell.fill      = header_fill
-            cell.font      = header_font
-            cell.alignment = Alignment(horizontal="center")
-            ws.column_dimensions[cell.column_letter].width = 22
-
-        # Colonnes 8 (présence) et 9 (frein) surlignées dans le header
-        ws.cell(row=1, column=8).fill = PatternFill("solid", fgColor="C00000")
-        ws.cell(row=1, column=9).fill = PatternFill("solid", fgColor="C00000")
-
-        for row_idx, row in enumerate(rows, start=2):
-            values = [
-                row["telegram_id"], row["joined_at"] or "",
-                row["prenom"] or "", row["whatsapp"] or "",
-                row["pays"] or "", row["deja_trade"] or "",
-                row["interet"] or "", row["presence"] or "",
-                row["frein"] or "",
-                row["level"] or "", row["objectif"] or "", row["email"] or "",
-                row["categorie"] or "", row["complet"] or "Non",
-                row["last_seen"] or "",
-            ]
-            fill = PatternFill("solid", fgColor="EBF3FB" if row_idx % 2 == 0 else "FFFFFF")
-            for col_idx, val in enumerate(values, start=1):
-                cell = ws.cell(row=row_idx, column=col_idx, value=val)
-                # Surligner présence et frein s'ils sont remplis
-                if col_idx in (8, 9) and val:
-                    cell.fill = highlight_fill
-                else:
-                    cell.fill = fill
-
-        # ── Feuille synthèse pour Charbel : compteurs présence + frein ──
-        ws2 = wb.create_sheet("Synthèse pour Charbel")
-        ws2.cell(row=1, column=1, value="PRÉSENCE").font = Font(bold=True, size=14)
-        ws2.cell(row=2, column=1, value="Réponse")
-        ws2.cell(row=2, column=2, value="Nombre")
-
-        pres_stats = conn.execute("""
-            SELECT presence, COUNT(*) as n FROM users
-            WHERE completed=1 AND presence IS NOT NULL
-            GROUP BY presence
-        """).fetchall()
-        r = 3
-        for row in pres_stats:
-            ws2.cell(row=r, column=1, value=row["presence"])
-            ws2.cell(row=r, column=2, value=row["n"])
-            r += 1
-
-        r += 2
-        ws2.cell(row=r, column=1, value="FREINS").font = Font(bold=True, size=14)
-        r += 1
-        ws2.cell(row=r, column=1, value="Réponse")
-        ws2.cell(row=r, column=2, value="Nombre")
-        r += 1
-        frein_stats = conn.execute("""
-            SELECT frein, COUNT(*) as n FROM users
-            WHERE completed=1 AND frein IS NOT NULL
-            GROUP BY frein ORDER BY n DESC
-        """).fetchall()
-        for row in frein_stats:
-            ws2.cell(row=r, column=1, value=row["frein"])
-            ws2.cell(row=r, column=2, value=row["n"])
-            r += 1
-
-        ws2.column_dimensions["A"].width = 40
-        ws2.column_dimensions["B"].width = 12
-
-        buf = io.BytesIO()
-        wb.save(buf)
-        buf.seek(0)
-
-        total     = len(rows)
-        complets  = sum(1 for r in rows if r["complet"] == "Oui")
-        sans_info = sum(1 for r in rows if not r["prenom"])
-
-        await update.message.reply_document(
-            document=buf,
-            filename="trading_pour_tous_export.xlsx",
-            caption=(
-                "Export complet\n\n"
-                + "Total membres : *" + str(total) + "*\n"
-                + "Inscriptions complètes : *" + str(complets) + "*\n"
-                + "Sans informations : *" + str(sans_info) + "*\n\n"
-                + "_Onglet « Synthèse pour Charbel » : présence + freins agrégés_"
-            ),
-            parse_mode="Markdown"
-        )
-
-    except ImportError:
-        await update.message.reply_text(
-            "Le module openpyxl n'est pas installé. Lance : pip install openpyxl"
-        )
-    except Exception as e:
-        await update.message.reply_text(f"Erreur lors de l'export : {e}")
+@admin_seulement
+async def cmd_codes(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if len(ctx.args) == 4 and ctx.args[0] in ("1", "2"):
+        mots = [normaliser(m) for m in ctx.args[1:]]
+        db.definir_codes(int(ctx.args[0]), mots)
+        await update.message.reply_text(f"✅ Codes du soir {ctx.args[0]} : " + " · ".join(mots))
+        return
+    actuels = "\n".join(f"Soir {c['jour']} — code {c['rang']} : {c['mot']}" for c in db.get_codes()) or "(aucun)"
+    await update.message.reply_text(f"Codes actuels :\n{actuels}\n\nPour définir : /codes 1 NASDAQ OR BTC")
 
 
 # ════════════════════════════════════════════════════════════════════════════
-# ── CONVERSATION INSCRIPTION ──────────────────────────────────────────────────
+# COMMANDES ADMIN — /envoyer et /export (même choix de cible)
 # ════════════════════════════════════════════════════════════════════════════
 
-async def je_me_enregistre(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    _touch_last_seen(user_id)
-    if _is_already_registered(user_id):
-        await _reply_already_registered(context.bot, user_id)
+CHOIX_CIBLE, RECEVOIR_MESSAGE = range(2)
+
+
+async def afficher_cibles(update, ctx, action, titre):
+    ctx.user_data["action"] = action
+    lignes = [titre, ""]
+    for numero, (libelle, get_ids) in enumerate(CIBLES.values(), start=1):
+        lignes.append(f"{numero} — {libelle} ({len(get_ids())})")
+    lignes.append("\nRéponds avec le numéro (ou /cancel).")
+    await update.message.reply_text("\n".join(lignes))
+    return CHOIX_CIBLE
+
+
+@admin_seulement
+async def cmd_envoyer(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    return await afficher_cibles(update, ctx, "envoyer", "À qui envoyer le message ?")
+
+
+@admin_seulement
+async def cmd_export(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    return await afficher_cibles(update, ctx, "export", "Quelle liste exporter ?")
+
+
+async def choisir_cible(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    cles = list(CIBLES)
+    choix = update.message.text.strip()
+    if not choix.isdigit() or not 1 <= int(choix) <= len(cles):
+        await update.message.reply_text(f"❌ Réponds avec un numéro entre 1 et {len(cles)}.")
+        return CHOIX_CIBLE
+    cle = cles[int(choix) - 1]
+    ctx.user_data["cible"] = cle
+
+    if ctx.user_data["action"] == "export":
+        await exporter(update, cle)
         return ConversationHandler.END
-
-    await update.message.reply_text(
-        "🚀 *Confirme ta place — Formation gratuite Trading Pour Tous*\n\n"
-        "📅 *2 et 3 septembre, 21h00* (heure du Bénin)\n"
-        "🎥 En direct uniquement — places limitées\n\n"
-        "Je suis l'assistant de Charbel Yayi 👋\n"
-        "Je vais te guider étape par étape pour ton inscription.\n\n"
-        "*1/7 — Comment tu t'appelles ?* 😊\n\n"
-        "_Réponds simplement avec ton prénom_",
-        parse_mode="Markdown"
-    )
-    return PRENOM
+    await update.message.reply_text(f"✅ Cible : {CIBLES[cle][0]}\n\nEnvoie maintenant ton message "
+                                    "(texte, photo ou vidéo avec légende).")
+    return RECEVOIR_MESSAGE
 
 
-async def get_prenom(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.message.from_user.id
-    texte   = update.message.text.strip()
-    _touch_last_seen(user_id)
-
-    prenom_candidat, confirmation_requise = _extraire_prenom(texte)
-
-    if confirmation_requise:
-        context.user_data["prenom_candidat"] = prenom_candidat
-        context.user_data["prenom_original"]  = texte
-
-        if len(prenom_candidat) > 15:
-            await update.message.reply_text(
-                "J'ai du mal à identifier ton prénom dans ce que tu as écrit.\n\n"
-                "Peux-tu m'envoyer *uniquement ton prénom* s'il te plaît ?",
-                parse_mode="Markdown"
-            )
-            return PRENOM
-
-        await update.message.reply_text(
-            f"Est-ce que ton prénom est *{prenom_candidat}* ?",
-            parse_mode="Markdown",
-            reply_markup=kb_prenom_confirm(prenom_candidat)
-        )
-        return PRENOM_CONFIRM
-
-    prenom = prenom_candidat
-    context.user_data["prenom"] = prenom
-    upsert_user(user_id, prenom=prenom)
-    return await _ask_whatsapp(update.message, prenom)
-
-
-async def confirm_prenom(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query   = update.callback_query
-    await query.answer()
-    user_id = query.from_user.id
-
-    if query.data == "prenom_oui":
-        prenom = context.user_data["prenom_candidat"]
-        context.user_data["prenom"] = prenom
-        upsert_user(user_id, prenom=prenom)
-        await query.message.reply_text(f"Parfait *{prenom}* 👋", parse_mode="Markdown")
-        return await _ask_whatsapp(query.message, prenom)
-
-    await query.message.reply_text(
-        "Pas de souci 😊\n\nEnvoie-moi juste ton prénom :",
-        parse_mode="Markdown"
-    )
-    return PRENOM
-
-
-async def _ask_whatsapp(message, prenom: str) -> int:
-    await message.reply_text(
-        f"Enchanté *{prenom}* 👋\n\n"
-        "*2/7 — Quel est ton numéro WhatsApp ?*\n"
-        "Je t'enverrai les rappels pour la formation 😊\n\n"
-        "_(avec indicatif pays si possible, ex : +229 60619292)_",
-        parse_mode="Markdown"
-    )
-    return WHATSAPP
-
-
-async def get_whatsapp(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id  = update.message.from_user.id
-    whatsapp = update.message.text.strip()
-    context.user_data["whatsapp"] = whatsapp
-    upsert_user(user_id, whatsapp=whatsapp)
-
-    await update.message.reply_text(
-        "*3/7 — Dans quel pays es-tu ?* 🌍\n\n"
-        "_(Ex : Bénin, Côte d'Ivoire, France...)_",
-        parse_mode="Markdown"
-    )
-    return PAYS
-
-
-async def get_pays(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.message.from_user.id
-    pays    = update.message.text.strip()
-    context.user_data["pays"] = pays
-    upsert_user(user_id, pays=pays)
-
-    await update.message.reply_text(
-        "*4/7 — As-tu déjà fait du trading ?*",
-        parse_mode="Markdown",
-        reply_markup=kb_deja_trade()
-    )
-    return DEJA_TRADE
-
-
-async def get_deja_trade(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query   = update.callback_query
-    await query.answer()
-    user_id = query.from_user.id
-
-    reponse = "Oui" if query.data == "trade_oui" else "Non"
-    context.user_data["deja_trade"] = reponse
-    upsert_user(user_id, deja_trade=reponse)
-
-    # Logique conditionnelle : si "Non", proposer les vidéos d'initiation
-    if reponse == "Non":
-        await query.message.reply_text(
-            "🎬 <b>Tu débutes en trading ?</b>\n\n"
-            "On a préparé une série de <b>10 vidéos d'initiation</b>, spécialement pour toi, "
-            "pour que tu arrives à la formation gratuite déjà à l'aise avec les bases.\n\n"
-            f'👉 <a href="{LIEN_YOUTUBE_DEBUTANTS}">Clique ici pour les rejoindre</a>\n\n'
-            "<i>On continue ton inscription 👇</i>",
-            parse_mode="HTML",
-            disable_web_page_preview=False
-        )
-
-    await query.message.reply_text(
-        "*5/7 — Qu'est-ce qui t'intéresse le plus dans le trading ?*",
-        parse_mode="Markdown",
-        reply_markup=kb_interet()
-    )
-    return INTERET
-
-
-async def get_interet(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query   = update.callback_query
-    await query.answer()
-    user_id = query.from_user.id
-
-    int_map = {
-        "int_revenu":       "Un revenu complémentaire",
-        "int_competence":   "Apprendre une nouvelle compétence",
-        "int_independance": "L'indépendance financière",
-        "int_autre":        "Autre",
-    }
-    interet = int_map.get(query.data, "Non précisé")
-    context.user_data["interet"] = interet
-    upsert_user(user_id, interet=interet)
-
-    await query.message.reply_text(
-        "*6/7 — Peux-tu être présent le 2 ET le 3 septembre à 21h ?*\n\n"
-        "_⚠️ Pas d'option replay — la session est en direct uniquement_",
-        parse_mode="Markdown",
-        reply_markup=kb_presence()
-    )
-    return PRESENCE
-
-
-async def get_presence(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query   = update.callback_query
-    await query.answer()
-    user_id = query.from_user.id
-
-    pres_map = {
-        "pres_deux": "Oui, les deux jours",
-        "pres_un":   "Un seul des deux jours",
-    }
-    presence = pres_map.get(query.data, "Non précisé")
-    context.user_data["presence"] = presence
-    upsert_user(user_id, presence=presence)
-
-    await query.message.reply_text(
-        "*7/7 — Qu'est-ce qui t'a empêché jusqu'ici de te lancer dans le trading ?*",
-        parse_mode="Markdown",
-        reply_markup=kb_frein()
-    )
-    return FREIN
-
-
-async def get_frein(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query   = update.callback_query
-    await query.answer()
-    user_id = query.from_user.id
-
-    frein_map = {
-        "frein_temps":      "Le manque de temps",
-        "frein_peur":       "La peur de perdre de l'argent",
-        "frein_commencer":  "Je ne sais pas par où commencer",
-        "frein_autre":      "Autre",
-    }
-    frein = frein_map.get(query.data, "Non précisé")
-    context.user_data["frein"] = frein
-    upsert_user(user_id, frein=frein)
-
-    prenom     = context.user_data.get("prenom", "")
-    whatsapp   = context.user_data.get("whatsapp", "")
-    pays       = context.user_data.get("pays", "")
-    deja_trade = context.user_data.get("deja_trade", "")
-    interet    = context.user_data.get("interet", "")
-    presence   = context.user_data.get("presence", "")
-
-    await query.message.reply_text(
-        f"*Récapitulatif de ton inscription :*\n\n"
-        f"👤 Prénom : *{prenom}*\n"
-        f"📱 WhatsApp : *{whatsapp}*\n"
-        f"🌍 Pays : *{pays}*\n"
-        f"📊 Déjà tradé : *{deja_trade}*\n"
-        f"🎯 Intérêt : *{interet}*\n"
-        f"📅 Présence : *{presence}*\n"
-        f"🧱 Frein : *{frein}*\n\n"
-        "En confirmant, tu acceptes de recevoir les rappels par WhatsApp et Telegram.\n"
-        "Tu peux te désinscrire à tout moment.\n\n"
-        "👇",
-        parse_mode="Markdown",
-        reply_markup=kb_confirmation()
-    )
-    return CONFIRMATION
-
-
-async def confirmer_inscription(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query   = update.callback_query
-    await query.answer()
-    user_id = query.from_user.id
-    prenom  = context.user_data.get("prenom", "")
-    upsert_user(user_id, completed=1)
-    await query.message.reply_text(
-        f"🎉 *C'est noté {prenom} !*\n\n"
-        "Ta place est confirmée pour la formation gratuite "
-        "*Trading Pour Tous* les *2 et 3 septembre à 21h* (heure du Bénin).\n\n"
-        "On se retrouve dans le canal Telegram pour tous les rappels avant le jour J.\n\n"
-        "Tu recevras aussi le lien du live et les rappels par *WhatsApp et Telegram*.\n\n"
-        "À très vite 🔥",
-        parse_mode="Markdown"
-    )
+async def recevoir_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    cle = ctx.user_data["cible"]
+    await update.message.reply_text("📤 Diffusion lancée en arrière-plan…")
+    lancer(diffuser(ctx.bot, update.effective_chat.id, update.message.message_id, cle))
     return ConversationHandler.END
 
 
-async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "Inscription annulée. Tape /JeMEnregistre pour recommencer."
-    )
+async def annuler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("❌ Annulé.")
     return ConversationHandler.END
 
 
-async def timeout_inscription(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id if update.effective_user else None
-    if user_id:
+async def diffuser(bot, admin_chat, message_id, cle):
+    """Copie le message de l'admin (quel que soit son format) à chaque personne de la cible."""
+    libelle, get_ids = CIBLES[cle]
+    ids = get_ids()
+    ok = 0
+    for uid in ids:
         try:
-            await context.bot.send_message(
-                chat_id=user_id,
-                text=(
-                    "⏰ Ta session a expiré après 5 minutes d'inactivité.\n\n"
-                    "Ton inscription n'a pas été enregistrée.\n\n"
-                    "Quand tu es prêt, clique sur /JeMEnregistre pour recommencer !"
-                ),
-                parse_mode="Markdown"
-            )
+            await bot.copy_message(chat_id=uid, from_chat_id=admin_chat, message_id=message_id)
+            ok += 1
         except Exception as e:
-            print(f"Timeout message uid={user_id} : {e}")
+            print(f"Diffusion uid={uid} : {e}")
+        await asyncio.sleep(PAUSE_ENVOI)
+    await bot.send_message(chat_id=admin_chat, text=f"Diffusion terminée — {ok}/{len(ids)} envoyés à « {libelle} ».")
+
+
+def construire_excel(lignes) -> bytes:
+    from openpyxl import Workbook
+    from openpyxl.styles import Alignment, Font, PatternFill
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Export"
+    entetes = list(lignes[0])
+    ws.append(entetes)
+    for ligne in lignes:
+        ws.append([ligne[e] for e in entetes])
+
+    cles = {"Q3 Déjà tradé", "Q4 Frein", "Q5 Présence"}          # colonnes à lire avant le live
+    for cellule in ws[1]:
+        couleur = "C00000" if cellule.value in cles else "1F4E79"
+        cellule.fill = PatternFill("solid", fgColor=couleur)
+        cellule.font = Font(bold=True, color="FFFFFF")
+        cellule.alignment = Alignment(horizontal="center", wrap_text=True)
+        ws.column_dimensions[cellule.column_letter].width = 22
+    ws.freeze_panes = "A2"
+
+    synthese = wb.create_sheet("Synthèse")
+    for titre in ("Q3 Déjà tradé", "Q4 Frein", "Q5 Présence"):
+        synthese.append([titre])
+        synthese.append(["Réponse", "Nombre"])
+        for reponse, n in Counter(l[titre] or "(vide)" for l in lignes).most_common():
+            synthese.append([reponse, n])
+        synthese.append([])
+    synthese.column_dimensions["A"].width = 45
+
+    buffer = io.BytesIO()
+    wb.save(buffer)
+    return buffer.getvalue()
+
+
+async def exporter(update, cle):
+    libelle, get_ids = CIBLES[cle]
+    ids = get_ids()
+    if not ids:
+        await update.message.reply_text(f"❌ Personne dans « {libelle} ».")
+        return
+    lignes = db.lignes_export(ids, SEUILS)
+    date = db.now_benin().strftime("%d%m_%Hh%M")
+    await update.message.reply_document(
+        document=construire_excel(lignes), filename=f"export_{cle}_{date}.xlsx",
+        caption=f"Export « {libelle} » : {len(lignes)} personnes.\n"
+                "Onglet « Synthèse » : réponses Q3 / Q4 / Q5 comptées.")
 
 
 # ════════════════════════════════════════════════════════════════════════════
-# ── GESTIONNAIRE D'ERREURS GLOBAL ────────────────────────────────────────────
+# COMMANDES ADMIN — /stats et catégories
 # ════════════════════════════════════════════════════════════════════════════
 
-async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
-    tb = "".join(traceback.format_exception(
-        type(context.error), context.error, context.error.__traceback__
-    ))
+@admin_seulement
+async def cmd_stats(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    def bloc(dictionnaire):
+        return "\n".join(f"  • {k} : {v}" for k, v in dictionnaire.items()) or "  (aucun)"
 
-    uname = "?"
-    texte = ""
-    if isinstance(update, Update):
-        user  = update.effective_user
-        uname = f"@{user.username}" if user and user.username else str(user.id if user else "?")
-        msg   = update.message or (update.callback_query.message if update.callback_query else None)
-        texte = (msg.text or "")[:100] if msg else ""
+    tous, confirmes = db.ids_tous(), db.ids_confirmes(WEBINAIRE)
+    soirs = "\n".join(
+        f"  • {JOURS[j]['nom']} : {len(db.ids_confirmes(WEBINAIRE, j))} prévus · "
+        f"{db.nb_clics('live', j)} ont cliqué · {len(db.ids_presents(j, SEUILS[j]))} présents"
+        for j in JOURS)
+    await update.message.reply_text(
+        "Statistiques Trading Pour Tous\n\n"
+        f"👥 Personnes connues : {len(tous)}\n"
+        f"✅ Confirmées : {len(confirmes)}\n"
+        f"⏳ Pas encore confirmées : {len(tous) - len(confirmes)}\n\n"
+        f"Liens d'entrée :\n{bloc(db.compter_liens())}\n\n"
+        f"Q3 Déjà tradé :\n{bloc(db.compter_reponses(WEBINAIRE, 'deja_trade'))}\n\n"
+        f"Q4 Freins :\n{bloc(db.compter_reponses(WEBINAIRE, 'frein'))}\n\n"
+        f"Q5 Présence :\n{bloc(db.compter_reponses(WEBINAIRE, 'presence'))}\n\n"
+        f"Soirs :\n{soirs}\n\n"
+        f"📅 Ont cliqué sur le calendrier : {db.nb_clics('agenda_android') + db.nb_clics('agenda_iphone')}")
 
-    tb_court  = tb[-2000:] if len(tb) > 2000 else tb
-    ligne_sep = "\n"
-    notif = (
-        "*ERREUR BOT*" + ligne_sep + ligne_sep
-        + "User : " + uname + ligne_sep
-        + "Message : _" + texte + "_" + ligne_sep + ligne_sep
-        + "`" + tb_court + "`"
-    )
+
+@admin_seulement
+async def cmd_categorie(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    nom = " ".join(ctx.args).strip()
+    if len(nom) < 3:
+        liste = "\n".join(f"• {c}" for c in db.get_categories())
+        await update.message.reply_text(f"Catégories :\n{liste}\n\nPour en créer une : /nouvelle_categorie <nom>")
+        return
+    db.ajouter_categorie(nom)
+    await update.message.reply_text(f"✅ Catégorie « {nom} » créée.")
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# ERREURS ET LANCEMENT
+# ════════════════════════════════════════════════════════════════════════════
+
+async def error_handler(update: object, ctx: ContextTypes.DEFAULT_TYPE):
+    tb = "".join(traceback.format_exception(type(ctx.error), ctx.error, ctx.error.__traceback__))
     print(f"[ERROR] {tb}")
-
-    for admin_id in ADMIN_IDS:
-        try:
-            await context.bot.send_message(
-                chat_id=admin_id,
-                text=notif,
-                parse_mode="Markdown"
-            )
-        except Exception as e:
-            print(f"Impossible d'envoyer l'erreur à l'admin {admin_id} : {e}")
+    qui = ""
+    if isinstance(update, Update) and update.effective_user:
+        qui = f"User : {update.effective_user.id}\n\n"
+    await prevenir_admins(ctx.bot, f"ERREUR BOT\n\n{qui}{tb[-1800:]}")
 
 
-# ════════════════════════════════════════════════════════════════════════════
-# ── MAIN ──────────────────────────────────────────────────────────────────────
-# ════════════════════════════════════════════════════════════════════════════
+def main():
+    if not TOKEN:
+        raise SystemExit("❌ Définis la variable d'environnement BOT_TOKEN (token régénéré via @BotFather).")
 
-if __name__ == "__main__":
-    init_db()
-    _migrate_db()   # ← IMPORTANT : décommenté pour appliquer les nouvelles colonnes
+    db.init_db()
+    db.seed_rappels(PLANNING)
     init_sondage_db()
 
-    app = (
-        Application.builder()
-        .token(TOKEN)
-        .read_timeout(30)
-        .write_timeout(30)
-        .build()
-    )
+    app = (Application.builder().token(TOKEN).read_timeout(30).write_timeout(30)
+           .post_init(demarrer_planificateur).build())
 
-    # ── Handlers standards ────────────────────────────────────────────────
-    app.add_handler(ChatJoinRequestHandler(approve_join_request))
-    app.add_handler(CommandHandler("start",        start))
-    app.add_handler(CommandHandler("stats",        stats))
-    app.add_handler(CommandHandler("relancer",     relancer))
-    app.add_handler(CommandHandler("export_users", export_users))
-    app.add_handler(CallbackQueryHandler(relance_callback, pattern="^relance_go$"))
+    app.add_handler(ChatJoinRequestHandler(approuver_demande))
+    app.add_handler(CommandHandler("start", cmd_start))
+    app.add_handler(CommandHandler("JeMEnregistre", cmd_inscription))
+    for nom, fonction in [("aide", cmd_aide), ("stats", cmd_stats), ("rappels", cmd_rappels),
+                          ("modifier", cmd_modifier), ("tester_rappel", cmd_tester_rappel),
+                          ("envoyer_rappel", cmd_envoyer_rappel), ("codes", cmd_codes),
+                          ("nouvelle_categorie", cmd_categorie)]:
+        app.add_handler(CommandHandler(nom, fonction))
 
-    # ── Conversations ─────────────────────────────────────────────────────
-    conv_inscription = ConversationHandler(
-        entry_points=[CommandHandler("JeMEnregistre", je_me_enregistre)],
+    app.add_handler(ConversationHandler(
+        entry_points=[CommandHandler("envoyer", cmd_envoyer), CommandHandler("export", cmd_export)],
         states={
-            PRENOM:         [MessageHandler(filters.TEXT & ~filters.COMMAND, get_prenom)],
-            PRENOM_CONFIRM: [CallbackQueryHandler(confirm_prenom, pattern="^prenom_(oui|non)$")],
-            WHATSAPP:       [MessageHandler(filters.TEXT & ~filters.COMMAND, get_whatsapp)],
-            PAYS:           [MessageHandler(filters.TEXT & ~filters.COMMAND, get_pays)],
-            DEJA_TRADE:     [CallbackQueryHandler(get_deja_trade, pattern="^trade_(oui|non)$")],
-            INTERET:        [CallbackQueryHandler(get_interet,    pattern="^int_")],
-            PRESENCE:       [CallbackQueryHandler(get_presence,   pattern="^pres_")],
-            FREIN:          [CallbackQueryHandler(get_frein,      pattern="^frein_")],
-            CONFIRMATION:   [CallbackQueryHandler(confirmer_inscription, pattern="^confirme$")],
-            ConversationHandler.TIMEOUT: [
-                MessageHandler(filters.ALL, timeout_inscription),
-                CallbackQueryHandler(timeout_inscription),
-            ],
+            CHOIX_CIBLE: [MessageHandler(filters.TEXT & ~filters.COMMAND, choisir_cible)],
+            RECEVOIR_MESSAGE: [MessageHandler(filters.ALL & ~filters.COMMAND, recevoir_message)],
         },
-        fallbacks=[CommandHandler("cancel", cancel)],
+        fallbacks=[CommandHandler("cancel", annuler)],
         per_chat=False, per_user=True, allow_reentry=True,
-        conversation_timeout=300,
-    )
-
-    conv_broadcast = ConversationHandler(
-        entry_points=[CommandHandler("envoyer", bc_start)],
-        states={
-            BC_CIBLE:  [MessageHandler(filters.TEXT & ~filters.COMMAND, bc_get_cible)],
-            BC_FORMAT: [MessageHandler(filters.TEXT & ~filters.COMMAND, bc_get_format)],
-            BC_MEDIA:  [MessageHandler(filters.PHOTO | filters.VIDEO,   bc_get_media)],
-            BC_TEXT:   [MessageHandler(filters.TEXT | filters.PHOTO | filters.VIDEO, bc_get_text)],
-        },
-        fallbacks=[CommandHandler("cancel", bc_cancel)],
-        per_chat=False, per_user=True, allow_reentry=True,
-    )
-
-    conv_categorie = ConversationHandler(
-        entry_points=[CommandHandler("nouvelle_categorie", nouvelle_categorie_start)],
-        states={
-            CAT_NOM: [MessageHandler(filters.TEXT & ~filters.COMMAND, nouvelle_categorie_nom)],
-        },
-        fallbacks=[CommandHandler("cancel", nouvelle_categorie_cancel)],
-        per_chat=False, per_user=True, allow_reentry=True,
-    )
-
+    ))
+    app.add_handler(CallbackQueryHandler(boutons, pattern=r"^(q|prenom|live|agenda|demarrer|souci)(:|$)"))
     app.add_error_handler(error_handler)
-    app.add_handler(conv_inscription)
-    app.add_handler(conv_broadcast)
-    app.add_handler(conv_categorie)
 
-    # ── Handlers sondage ──────────────────────────────────────────────────
     register_sondage_handlers(app)
 
-    # ── En dernier — capture tout message hors conversation ───────────────
+    # En dernier : capte tout texte hors commande (codes du soir, questionnaire, messages libres)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_libre))
 
     print("start...")
     app.run_polling(poll_interval=1, allowed_updates=Update.ALL_TYPES)
+
+
+if __name__ == "__main__":
+    main()
