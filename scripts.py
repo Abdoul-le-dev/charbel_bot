@@ -29,7 +29,7 @@ load_dotenv()
 # CONFIGURATION
 # ════════════════════════════════════════════════════════════════════════════
 
-TOKEN = os.getenv("BOT_TOKEN")          # ne JAMAIS écrire le token dans le code
+TOKEN = os.getenv("TOKEN")          # ne JAMAIS écrire le token dans le code
 ADMIN_IDS = {6992809421, 6799962131}
 ADMIN_USERNAME = "@Faiseur2Rois"
 
