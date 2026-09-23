@@ -22,6 +22,9 @@ from telegram.ext import (
 
 from database import database as db
 from sondage import init_sondage_db, register_sondage_handlers   # module sondage : inchangé
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # ════════════════════════════════════════════════════════════════════════════
 # CONFIGURATION
