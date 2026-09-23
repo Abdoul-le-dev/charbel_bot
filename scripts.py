@@ -25,7 +25,6 @@ from sondage import init_sondage_db, register_sondage_handlers   # module sondag
 from dotenv import load_dotenv
 
 load_dotenv()
-
 # ════════════════════════════════════════════════════════════════════════════
 # CONFIGURATION
 # ════════════════════════════════════════════════════════════════════════════
@@ -35,7 +34,7 @@ ADMIN_IDS = {6992809421, 6799962131}
 ADMIN_USERNAME = "@Faiseur2Rois"
 
 WEBINAIRE = "2026-09-30"                # identifiant du webinaire : sert à savoir qui est déjà inscrit
-HEURE_LIVE = 20                         # heure du Bénin
+HEURE_LIVE = 21                         # heure du Bénin
 DUREE_LIVE = 2                          # heures (uniquement pour le calendrier)
 JOURS = {
     1: {"date": "2026-09-30", "nom": "30 septembre", "semaine": "mercredi",
@@ -45,7 +44,7 @@ JOURS = {
 }
 
 VIDEO_BIENVENUE = "video/welcomes.MP4"
-VIDEO_RELANCE = "bienvenu.mp4"                    # à la racine
+VIDEO_RELANCE = "video/welcomes.MP4"                    # à la racine
 # VIDEO_BULLE = "bulle.mp4"                       # vidéo ronde (voir demarrer_questionnaire)
 
 FREINS = ["Le manque de temps", "La peur de perdre de l'argent",
@@ -98,7 +97,7 @@ def kb(*boutons):
     return InlineKeyboardMarkup([[InlineKeyboardButton(t, callback_data=d)] for t, d in boutons])
 
 
-def kb_demarrer(texte="✅ Je confirme ma place"):
+def kb_demarrer(texte="Je confirme ma place"):
     return kb((texte, "demarrer"))
 
 
@@ -252,12 +251,10 @@ def inscrit(u) -> bool:
 
 async def message_deja_inscrit(bot, uid):
     u = db.get_user(uid)
-    await ecrire(
-        bot, uid,
-        "✅ <b>Tu es déjà inscrit(e) à la formation Trading Pour Tous</b>\n\n"
-        f"Rendez-vous {dates_texte(jours_choisis(u))} à {HEURE_LIVE}h00 (heure du Bénin).\n\n"
-        "Ton lien du direct et tous les rappels te seront envoyés ici, en privé.\n\n"
-        "Hâte de te voir en ligne 🔥")
+    await ecrire(bot, uid,
+                 "<b>Tu es déjà inscrit(e)</b>\n\n"
+                 f"Rendez-vous {dates_texte(jours_choisis(u))} à {HEURE_LIVE}h00 (heure du Bénin).\n\n"
+                 "Ton lien du direct et les rappels arrivent ici, en privé.")
 
 
 async def demarrer_questionnaire(bot, uid):
@@ -275,9 +272,9 @@ async def demarrer_questionnaire(bot, uid):
 
     await ecrire(
         bot, uid,
-        "🚀 <b>Confirme ta place — Formation gratuite Trading Pour Tous</b>\n\n"
-        f"📅 <b>{JOURS[1]['nom']} et {JOURS[2]['nom']}, {HEURE_LIVE}h00</b> (heure du Bénin) — En direct\n"
-        "🎥 En direct uniquement — places limitées")
+        "<b>Confirme ta place</b>\nFormation gratuite Trading Pour Tous\n\n"
+        f"{JOURS[1]['nom']} et {JOURS[2]['nom']}, {HEURE_LIVE}h00 (heure du Bénin)\n"
+        "En direct uniquement, places limitées.")
 
     # ── Vidéo en bulle (désactivée) — pour l'activer : décommenter, mettre le fichier à la racine
     # (carré, 1 minute max) et définir VIDEO_BULLE en haut du fichier.
@@ -290,29 +287,29 @@ async def demarrer_questionnaire(bot, uid):
 async def poser_question(bot, uid):
     u = db.get_user(uid)
     etape = prochaine_etape(u)
-    prenom = h(u.get("prenom") or "")
 
     if etape == "prenom":
-        await ecrire(bot, uid, "<b>1/5 — Ton prénom ?</b> 😊\n\n<i>Réponds simplement avec ton prénom</i>")
+        await ecrire(bot, uid, "<b>Question 1 sur 5</b>\n\nQuel est ton prénom ?")
     elif etape == "whatsapp":
-        await ecrire(bot, uid, f"Enchanté {prenom} 👋\n\n<b>2/5 — Ton numéro WhatsApp ?</b>\n"
-                               "<i>(avec l'indicatif, ex : +229 60619292)</i>")
+        await ecrire(bot, uid, "<b>Question 2 sur 5</b>\n\nQuel est ton numéro WhatsApp ?\n\n"
+                               "<i>Avec l'indicatif, par exemple : +229 60619292</i>")
     elif etape == "trade":
-        await ecrire(bot, uid, "<b>3/5 — As-tu déjà fait du trading ?</b>",
-                     kb(("✅ Oui", "q:trade:Oui"), ("❌ Non", "q:trade:Non")))
+        await ecrire(bot, uid, "<b>Question 3 sur 5</b>\n\nAs-tu déjà fait du trading ?",
+                     kb(("Oui", "q:trade:Oui"), ("Non", "q:trade:Non")))
     elif etape == "frein":
-        await ecrire(bot, uid, "<b>4/5 — Qu'est-ce qui t'a empêché jusqu'ici de te lancer ?</b>",
+        await ecrire(bot, uid, "<b>Question 4 sur 5</b>\n\nQu'est-ce qui t'a empêché jusqu'ici de te lancer ?",
                      kb(*[(f, f"q:frein:{i}") for i, f in enumerate(FREINS)]))
     elif etape == "presence":
-        await ecrire(bot, uid, "<b>5/5 — Ta présence</b>\n\n<i>⚠️ En direct uniquement, pas de replay</i>",
-                     kb((f"✅ Je serai là en direct les DEUX soirs, à {HEURE_LIVE}h", "q:presence:deux"),
-                        ("⚠️ Je serai là un seul soir", "q:presence:un")))
+        await ecrire(bot, uid, "<b>Question 5 sur 5</b>\n\nTa présence\n\n<i>En direct uniquement, pas de replay.</i>",
+                     kb((f"Je serai là en direct les DEUX soirs, à {HEURE_LIVE}h", "q:presence:deux"),
+                        ("Je serai là un seul soir", "q:presence:un")))
     elif etape == "soir":
         await ecrire(bot, uid, "<b>Lequel des deux soirs ?</b>",
-                     kb(*[(f"📅 {JOURS[j]['nom']}", f"q:soir:{j}") for j in JOURS]))
+                     kb(*[(JOURS[j]["nom"], f"q:soir:{j}") for j in JOURS]))
     else:
-        await ecrire(bot, uid, f"Parfait {prenom} ! Il ne reste qu'un clic pour verrouiller ta place 👇",
-                     kb(("🚀 Confirmer ma place", "q:confirme:1")))
+        await ecrire(bot, uid, f"<b>Tout est prêt, {h(u.get('prenom') or '')}.</b>\n\n"
+                               "Il ne reste qu'un clic pour verrouiller ta place.",
+                     kb(("Confirmer ma place", "q:confirme:1")))
 
 
 async def repondre_texte(bot, uid, texte) -> bool:
@@ -330,16 +327,16 @@ async def repondre_texte(bot, uid, texte) -> bool:
                                        "Peux-tu m'envoyer <b>uniquement ton prénom</b> ?")
                 return True
             PRENOMS_A_CONFIRMER[uid] = prenom
-            await ecrire(bot, uid, f"Est-ce que ton prénom est <b>{h(prenom)}</b> ?",
-                         kb((f"✅ Oui, c'est bien {prenom}", "prenom:oui"), ("✏️ Non, je corrige", "prenom:non")))
+            await ecrire(bot, uid, f"Ton prénom est bien <b>{h(prenom)}</b> ?",
+                         kb((f"Oui, c'est bien {prenom}", "prenom:oui"), ("Non, je corrige", "prenom:non")))
             return True
         db.upsert_user(uid, prenom=prenom)
 
     elif etape == "whatsapp":
         numero = _valider_whatsapp(texte)
         if not numero:
-            await ecrire(bot, uid, "Ce numéro ne semble pas valide 🤔\n\n"
-                                   "Envoie-le avec l'indicatif, ex : <b>+229 60619292</b>")
+            await ecrire(bot, uid, "Ce numéro ne semble pas valide.\n\n"
+                                   "Envoie-le avec l'indicatif, par exemple :\n<b>+229 60619292</b>")
             return True
         db.upsert_user(uid, whatsapp=numero)
 
@@ -359,7 +356,7 @@ async def confirmer_prenom(bot, uid, reponse) -> bool:
         db.upsert_user(uid, prenom=prenom)
         await poser_question(bot, uid)
     else:
-        await ecrire(bot, uid, "Pas de souci 😊 Envoie-moi juste ton prénom :")
+        await ecrire(bot, uid, "Pas de souci.\n\nEnvoie-moi juste ton prénom :")
     return True
 
 
@@ -396,9 +393,10 @@ async def gerer_souci(bot, uid):
     (plus aucune relance automatique pour cette personne)."""
     db.upsert_user(uid, en_cours=0)
     await ecrire(bot, uid,
-                 f"Pas de souci 🙏 Pour t'aider rapidement, contacte directement Charbel ici : {ADMIN_USERNAME}\n\n"
-                 "Quand tu es prêt(e) à reprendre, clique ici 👇",
-                 kb_demarrer("▶️ Reprendre mon inscription"))
+                 "<b>Pas de souci.</b>\n\n"
+                 f"Pour t'aider rapidement, contacte directement Charbel : {ADMIN_USERNAME}\n\n"
+                 "Quand tu es prêt(e), tu peux reprendre ton inscription.",
+                 kb_demarrer("Reprendre mon inscription"))
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -448,16 +446,17 @@ def fichier_ics(jours) -> bytes:
 async def envoyer_confirmation(bot, uid):
     u = db.get_user(uid)
     jours = jours_choisis(u)
-    await ecrire(bot, uid, f"🎉 <b>C'est noté, {h(u['prenom'])} !</b>\n\n"
+    await ecrire(bot, uid, f"<b>C'est noté, {h(u['prenom'])}.</b>\n\n"
                            f"Ta place est confirmée pour {dates_texte(jours)} à {HEURE_LIVE}h.")
-    await ecrire(bot, uid, "📅 Ajoute la formation à ton calendrier pour ne pas oublier :",
-                 kb(("🤖 Android — Google Agenda", "agenda:android"),
-                    ("🍎 iPhone — Fichier calendrier", "agenda:iphone")))
+    await ecrire(bot, uid, "<b>Ajoute la formation à ton calendrier</b>\n\nPour ne pas oublier.",
+                 kb(("Android : Google Agenda", "agenda:android"),
+                    ("iPhone : fichier calendrier", "agenda:iphone")))
     await ecrire(bot, uid,
-                 "🔴 Voici ton lien pour le direct — garde-le précieusement 👇\n\n"
-                 "Je te rappellerai ici même, en privé, la veille et le jour J. "
+                 "<b>Ton lien pour le direct</b>\n\n"
+                 "Garde-le précieusement.\n\n"
+                 "Je te rappellerai ici même, en privé, la veille et le jour J.\n\n"
                  f"À {JOURS[jours[0]]['semaine']} soir !",
-                 kb(*[(f"🔴 Live du {JOURS[j]['nom']}", f"live:{j}") for j in jours]))
+                 kb(*[(f"Live du {JOURS[j]['nom']}", f"live:{j}") for j in jours]))
 
 
 async def envoyer_agenda(bot, uid, plateforme):
@@ -465,19 +464,19 @@ async def envoyer_agenda(bot, uid, plateforme):
     db.enregistrer_suivi(uid, f"agenda_{plateforme}")
     jours = jours_choisis(db.get_user(uid))
     if plateforme == "android":
-        bouton = InlineKeyboardMarkup([[InlineKeyboardButton("📅 Ajouter à Google Agenda",
+        bouton = InlineKeyboardMarkup([[InlineKeyboardButton("Ajouter à Google Agenda",
                                                               url=lien_google_agenda(jours[0]))]])
-        await ecrire(bot, uid, "Clique ici pour l'ajouter à ton agenda 👇", bouton)
+        await ecrire(bot, uid, "Clique ci-dessous pour l'ajouter à ton agenda.", bouton)
     else:
         await bot.send_document(chat_id=uid, document=fichier_ics(jours), filename="formation-trading-pour-tous.ics",
-                                caption="📅 Ouvre ce fichier pour l'ajouter à ton calendrier iPhone.")
+                                caption="Ouvre ce fichier pour l'ajouter à ton calendrier iPhone.")
 
 
 async def envoyer_lien_live(bot, uid, jour):
     """Clic sur « Rejoindre le live » : on note le clic (jour + heure), puis on envoie le vrai lien."""
     db.enregistrer_suivi(uid, "live", jour)
-    bouton = InlineKeyboardMarkup([[InlineKeyboardButton("▶️ Ouvrir le live", url=JOURS[jour]["live"])]])
-    await ecrire(bot, uid, f"🔴 Voici ton lien pour le direct du {JOURS[jour]['nom']} 👇", bouton)
+    bouton = InlineKeyboardMarkup([[InlineKeyboardButton("Ouvrir le live", url=JOURS[jour]["live"])]])
+    await ecrire(bot, uid, f"<b>Ton lien pour le direct du {JOURS[jour]['nom']}</b>", bouton)
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -489,14 +488,12 @@ async def envoyer_bienvenue(bot, uid, lien_entree=None):
     db.upsert_user(uid, categorie=db.derniere_categorie())
 
     legende = (
-        "🚀 <b>Bienvenue dans Trading Pour Tous !</b>\n\n"
-        "Tu es sur le point de réserver ta place à la formation gratuite :\n"
-        "<b>« Trading Pour Tous »</b>\n\n"
-        f"📅 <b>{JOURS[1]['nom']} et {JOURS[2]['nom']} à {HEURE_LIVE}h00</b> (heure du Bénin)\n"
-        "🎥 En direct uniquement — places limitées")
+        "<b>Bienvenue dans Trading Pour Tous</b>\n\n"
+        "Tu es sur le point de réserver ta place à la formation gratuite.\n\n"
+        f"<b>Dates</b>\n{JOURS[1]['nom']} et {JOURS[2]['nom']}, à {HEURE_LIVE}h00 (heure du Bénin)\n\n"
+        "<b>Format</b>\nEn direct uniquement. Places limitées.")
     await envoyer_video(bot, uid, VIDEO_BIENVENUE, legende, nom="welcomes_222", parse_mode="HTML")
-    await ecrire(bot, uid, "⚠️ <b>Il ne reste que peu de places</b>\n"
-                           "Les places s'envolent vite. Sécurise la tienne maintenant 👇",
+    await ecrire(bot, uid, "<b>Il reste peu de places.</b>\n\nClique ci-dessous pour confirmer la tienne.",
                  kb_demarrer())
 
 
@@ -585,7 +582,7 @@ async def traiter_code(bot, uid, texte, jour_actuel=None) -> bool:
     jour, rang = next(((j, r) for j, r in trouves if j == jour_actuel), trouves[0])
     db.enregistrer_suivi(uid, "code", jour, str(rang))
     prenom = (db.get_user(uid) or {}).get("prenom") or ""
-    await ecrire(bot, uid, f"✅ Code reçu {h(prenom)} ! Merci d'être en direct 🔥")
+    await ecrire(bot, uid, f"Code reçu, {h(prenom)}. Merci d'être en direct.")
     return True
 
 
@@ -667,43 +664,53 @@ for _i, _frein in enumerate(FREINS):
 # RAPPELS PLANIFIÉS (modifiables par l'admin) + RELANCES AUTOMATIQUES
 # ════════════════════════════════════════════════════════════════════════════
 
-# (heure, texte) — {prenom} est remplacé par le prénom. Le bouton « Rejoindre le live » est ajouté à chaque message.
+# (moment, texte) — moment = heure fixe "12:00" ou décalage en minutes par rapport au début du live.
+# {prenom} est remplacé par le prénom. Le bouton « Rejoindre le live » est ajouté à chaque message.
 SEQUENCE_SOIR = [
-    ("12:00", "{prenom}, ce soir à 21h. Ton lien est déjà là 👇"),
-    ("18:00", "Dans 3 heures. Charge ton téléphone 🔋"),
-    ("20:30", "Dans 30 minutes. Connecte-toi maintenant 👇"),
-    ("21:05", "On a commencé. Plus d'une centaine de personnes sont déjà là 🔥"),
+    ("12:00", f"{{prenom}}, ce soir à {HEURE_LIVE}h.\n\nTon lien est déjà là, juste en dessous."),
+    (-180, "Dans 3 heures.\n\nCharge ton téléphone."),
+    (-30, "Dans 30 minutes.\n\nConnecte-toi maintenant."),
+    (5, "On a commencé.\n\nPlus d'une centaine de personnes sont déjà là."),
 ]
+
+
+def _apres_live(jour, minutes) -> str:
+    return (debut_live(jour) + timedelta(minutes=minutes)).strftime(FORMAT)
+
 
 # (nom, cible, date d'envoi, texte, vidéo, bouton)  — bouton : "live_1" / "live_2" / "demarrer" / ""
 PLANNING = [
     ("Réinvitation septembre", "sept", "2026-09-25 12:00:00",
-     "{prenom}, la formation gratuite revient : mercredi 30 septembre et jeudi 1er octobre, 21h.\n\n"
-     "Tu avais réservé ta place en septembre — elle t'attend toujours.\n\nConfirme-la ici 👇",
+     "{prenom},\n\nla formation gratuite revient :\nmercredi 30 septembre et jeudi 1er octobre, à "
+     f"{HEURE_LIVE}h.\n\nTu avais réservé ta place en septembre. Elle t'attend toujours.\n\nConfirme-la ici.",
      "", "demarrer"),
     ("Veille J1 (vidéo)", "j1", "2026-09-29 20:00:00",
-     "Demain soir, 21h. Voilà ce que tu vas voir.", "29.mp4", "live_1"),
-    ("Fin J1 → demain", "confirmes", "2026-09-30 23:15:00",
-     f"Demain, je montre [{A_COMPLETER}]. Même heure, même lien.", "", "live_2"),
-    ("Absents J1 (replay)", "absents_1", "2026-09-30 23:45:00",
+     f"Demain soir, {HEURE_LIVE}h.\n\nVoilà ce que tu vas voir.", "29.mp4", "live_1"),
+    ("Fin J1 → demain", "confirmes", _apres_live(1, DUREE_LIVE * 60 + 15),
+     f"Demain, je montre [{A_COMPLETER}].\n\nMême heure, même lien.", "", "live_2"),
+    ("Absents J1 (replay)", "absents_1", _apres_live(1, DUREE_LIVE * 60 + 45),
      f"[{A_COMPLETER}] texte replay + relance", "", ""),
-    ("Présents J1 (offre)", "presents_1", "2026-09-30 23:45:00",
+    ("Présents J1 (offre)", "presents_1", _apres_live(1, DUREE_LIVE * 60 + 45),
      f"[{A_COMPLETER}] texte de l'offre", "", ""),
-    ("Absents J2 (replay)", "absents_2", "2026-10-01 23:45:00",
+    ("Absents J2 (replay)", "absents_2", _apres_live(2, DUREE_LIVE * 60 + 45),
      f"[{A_COMPLETER}] texte replay + relance", "", ""),
-    ("Présents J2 (offre)", "presents_2", "2026-10-01 23:45:00",
+    ("Présents J2 (offre)", "presents_2", _apres_live(2, DUREE_LIVE * 60 + 45),
      f"[{A_COMPLETER}] texte de l'offre", "", ""),
 ]
 for _jour, _infos in JOURS.items():
-    for _heure, _texte in SEQUENCE_SOIR:
-        PLANNING.append((f"J{_jour} {_heure}", f"j{_jour}", f"{_infos['date']} {_heure}:00",
+    for _moment, _texte in SEQUENCE_SOIR:
+        if isinstance(_moment, str):
+            _quand = datetime.strptime(f"{_infos['date']} {_moment}", "%Y-%m-%d %H:%M")
+        else:
+            _quand = debut_live(_jour) + timedelta(minutes=_moment)
+        PLANNING.append((f"J{_jour} {_quand:%H:%M}", f"j{_jour}", _quand.strftime(FORMAT),
                          _texte, "", f"live_{_jour}"))
 PLANNING.sort(key=lambda r: r[2])
 
 
 def clavier_rappel(bouton):
     if bouton.startswith("live_"):
-        return kb(("🔴 Rejoindre le live", f"live:{bouton[5:]}"))
+        return kb(("Rejoindre le live", f"live:{bouton[5:]}"))
     if bouton == "demarrer":
         return kb_demarrer()
     return None
@@ -740,8 +747,8 @@ async def envoyer_relance(bot, u, colonne):
     n = restantes(u)
     reste = ("il ne te reste qu'un clic pour confirmer ta place" if n == 0
              else f"il te reste {n} question{'s' if n > 1 else ''} pour confirmer ta place")
-    texte = f"{u.get('prenom') or 'Hello'}, {reste}.\n\nOù est-ce que tu bloques ? 👇"
-    markup = kb(("▶️ Je continue", "demarrer"), ("🆘 Je suis bloqué(e)", "souci"))
+    texte = f"{u.get('prenom') or 'Hello'}, {reste}.\n\nOù est-ce que tu bloques ?"
+    markup = kb(("Je continue", "demarrer"), ("Je suis bloqué(e)", "souci"))
     if colonne == "relance30":
         await envoyer_video(bot, u["telegram_id"], VIDEO_RELANCE, texte, markup)
     else:
