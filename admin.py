@@ -155,7 +155,7 @@ async def envoyer_relance(bot, u, colonne):
              else f"il te reste {n} question{'s' if n > 1 else ''} pour confirmer ta place")
     texte = f"👋 {u.get('prenom') or 'Hello'}, {reste}.\n\nOù est-ce que tu bloques ?"
     markup = kb(("➡️ Je continue", "demarrer"), ("🆘 Je suis bloqué(e)", "souci"))
-    if colonne == "relance30":
+    if colonne == "relance30_le":
         msg = await envoyer_video(bot, u["telegram_id"], VIDEO_RELANCE, texte, markup)
     else:
         msg = await bot.send_message(chat_id=u["telegram_id"], text=texte, reply_markup=markup)
@@ -165,9 +165,11 @@ async def envoyer_relance(bot, u, colonne):
 
 async def relancer_incomplets(bot, maintenant):
     """Relances automatiques : UNIQUEMENT les personnes créées à partir de DATE_LANCEMENT_RELANCES
-    (les anciens réinvités ne reçoivent que les messages de masse / rappels planifiés)."""
-    for colonne, minutes in (("relance5", 5), ("relance15", 15), ("relance30", 30)):
-        cibles = db.users_a_relancer(WEBINAIRE, colonne, maintenant - timedelta(minutes=minutes),
+    (les anciens réinvités ne reçoivent que les messages de masse / rappels planifiés).
+    Chaque palier attend un vrai écart de temps depuis l'envoi réel du précédent (db.ETAPES_RELANCE) :
+    ça évite que les 3 relances partent d'un coup lors d'un rattrapage après redémarrage/retard."""
+    for colonne, minutes_attente, colonne_precedente in db.ETAPES_RELANCE:
+        cibles = db.users_a_relancer(WEBINAIRE, colonne, minutes_attente, colonne_precedente,
                                      DATE_LANCEMENT_RELANCES)
         for u in cibles:
             db.marquer_relance(u["telegram_id"], colonne)          # d'abord : jamais deux envois

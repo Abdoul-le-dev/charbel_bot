@@ -136,9 +136,9 @@ COLONNES_USERS = {
     "veut_j2": "INTEGER",       # présent prévu le 1er octobre  (1/0)
     "webinaire": "TEXT",        # webinaire pour lequel la personne est inscrite
     "en_cours": "INTEGER DEFAULT 0",   # 1 = est en train de remplir le questionnaire
-    "relance5": "INTEGER DEFAULT 0",
-    "relance15": "INTEGER DEFAULT 0",
-    "relance30": "INTEGER DEFAULT 0",
+    "relance5_le": "TEXT",      # date/heure d'envoi de la relance à 5 min (NULL = pas encore envoyée)
+    "relance15_le": "TEXT",     # idem pour la relance à 15 min (envoyée 10 min après relance5_le)
+    "relance30_le": "TEXT",     # idem pour la relance à 30 min (envoyée 15 min après relance15_le)
 }
 
 
@@ -210,33 +210,45 @@ def log_message(telegram_id, texte):
                      (telegram_id, texte, _maintenant()))
 
 
-# Ordre des 3 relances automatiques : 5 min, 15 min, 30 min après la dernière activité.
-# Après la 3e (relance30) sans réponse, on arrête définitivement (pas de 4e colonne).
-SEQUENCE_RELANCES = ("relance5", "relance15", "relance30")
+# Ordre des 3 relances automatiques. Chaque palier attend `minutes` de VRAI temps écoulé depuis
+# l'événement de référence : la dernière activité pour la 1re, l'ENVOI EFFECTIF du palier précédent
+# pour les suivantes (pas depuis l'inactivité initiale — ça évite qu'elles partent toutes d'un coup
+# en cas de rattrapage après un redémarrage ou un retard). Après relance30_le, on arrête définitivement.
+ETAPES_RELANCE = (
+    ("relance5_le", 5, None),                 # 5 min après la dernière activité
+    ("relance15_le", 10, "relance5_le"),      # 10 min après l'envoi RÉEL de relance5
+    ("relance30_le", 15, "relance15_le"),     # 15 min après l'envoi RÉEL de relance15
+)
 
 
 def marquer_relance(telegram_id, colonne):
-    assert colonne in SEQUENCE_RELANCES
+    assert colonne in [c for c, _, _ in ETAPES_RELANCE]
     with connexion() as conn:
-        conn.execute(f"UPDATE users SET {colonne} = 1 WHERE telegram_id = ?", (telegram_id,))
+        conn.execute(f"UPDATE users SET {colonne} = ? WHERE telegram_id = ?", (_maintenant(), telegram_id))
 
 
-def users_a_relancer(webinaire, colonne, avant: datetime, inscrits_depuis: str) -> list[dict]:
-    """Questionnaire commencé, pas terminé, sans activité depuis `avant`, relance pas encore envoyée
-    (et, si ce n'est pas la 1re relance, la précédente doit déjà avoir été envoyée).
-    Ne concerne QUE les personnes créées à partir de `inscrits_depuis` (pas les anciens réinvités,
-    qui reçoivent uniquement les messages de masse / rappels planifiés, jamais les relances auto)."""
-    assert colonne in SEQUENCE_RELANCES
-    index = SEQUENCE_RELANCES.index(colonne)
-    precedente = SEQUENCE_RELANCES[index - 1] if index > 0 else None
-    condition_precedente = f"AND {precedente} = 1" if precedente else ""
+def users_a_relancer(webinaire, colonne, minutes_attente: int, colonne_precedente, inscrits_depuis: str) -> list[dict]:
+    """Personnes à relancer pour CE palier précisément :
+    - `minutes_attente` minutes doivent s'être écoulées depuis l'événement de référence
+      (dernière activité pour la 1re relance, envoi réel du palier précédent sinon)
+    - le palier courant n'a pas déjà été envoyé
+    - uniquement les personnes créées à partir de `inscrits_depuis` (pas les anciens réinvités)."""
+    assert colonne in [c for c, _, _ in ETAPES_RELANCE]
+    seuil = (now_benin() - timedelta(minutes=minutes_attente)).strftime("%Y-%m-%d %H:%M:%S")
     with connexion() as conn:
-        rows = conn.execute(
-            f"""SELECT * FROM users
-                WHERE completed = 0 AND en_cours = 1 AND webinaire = ?
-                  AND {colonne} = 0 {condition_precedente}
-                  AND updated_at <= ? AND created_at >= ?""",
-            (webinaire, avant.strftime("%Y-%m-%d %H:%M:%S"), inscrits_depuis)).fetchall()
+        if colonne_precedente is None:
+            rows = conn.execute(
+                f"""SELECT * FROM users
+                    WHERE completed = 0 AND en_cours = 1 AND webinaire = ?
+                      AND {colonne} IS NULL AND updated_at <= ? AND created_at >= ?""",
+                (webinaire, seuil, inscrits_depuis)).fetchall()
+        else:
+            rows = conn.execute(
+                f"""SELECT * FROM users
+                    WHERE completed = 0 AND en_cours = 1 AND webinaire = ?
+                      AND {colonne_precedente} IS NOT NULL AND {colonne} IS NULL
+                      AND {colonne_precedente} <= ? AND created_at >= ?""",
+                (webinaire, seuil, inscrits_depuis)).fetchall()
     return [dict(r) for r in rows]
 
 

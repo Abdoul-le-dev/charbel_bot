@@ -377,7 +377,7 @@ async def demarrer_questionnaire(bot, uid):
         # Nouveau webinaire : on garde prénom / WhatsApp / Q3 / Q4 déjà connus,
         # mais la présence est à redonner (les anciennes réponses concernaient septembre).
         db.upsert_user(uid, webinaire=WEBINAIRE, presence=None, veut_j1=None, veut_j2=None,
-                       completed=0, relance5=0, relance15=0, relance30=0)
+                       completed=0, relance5_le=None, relance15_le=None, relance30_le=None)
     db.upsert_user(uid, en_cours=1)
 
     noter(uid, await ecrire(bot, uid, "<b>⏳ Confirmation de ta présence en cours…</b>"))
