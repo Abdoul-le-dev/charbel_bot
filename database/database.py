@@ -123,7 +123,8 @@ COLONNES_USERS = {
     "veut_j2": "INTEGER",       # présent prévu le 1er octobre  (1/0)
     "webinaire": "TEXT",        # webinaire pour lequel la personne est inscrite
     "en_cours": "INTEGER DEFAULT 0",   # 1 = est en train de remplir le questionnaire
-    "relance10": "INTEGER DEFAULT 0",
+    "relance5": "INTEGER DEFAULT 0",
+    "relance15": "INTEGER DEFAULT 0",
     "relance30": "INTEGER DEFAULT 0",
 }
 
@@ -196,21 +197,29 @@ def log_message(telegram_id, texte):
                      (telegram_id, texte, _maintenant()))
 
 
+# Ordre des 3 relances automatiques : 5 min, 15 min, 30 min après la dernière activité.
+# Après la 3e (relance30) sans réponse, on arrête définitivement (pas de 4e colonne).
+SEQUENCE_RELANCES = ("relance5", "relance15", "relance30")
+
+
 def marquer_relance(telegram_id, colonne):
-    assert colonne in ("relance10", "relance30")
+    assert colonne in SEQUENCE_RELANCES
     with connexion() as conn:
         conn.execute(f"UPDATE users SET {colonne} = 1 WHERE telegram_id = ?", (telegram_id,))
 
 
 def users_a_relancer(webinaire, colonne, avant: datetime) -> list[dict]:
-    """Questionnaire commencé, pas terminé, sans activité depuis `avant`, relance pas encore envoyée."""
-    assert colonne in ("relance10", "relance30")
-    apres_10 = "AND relance10 = 1" if colonne == "relance30" else ""
+    """Questionnaire commencé, pas terminé, sans activité depuis `avant`, relance pas encore envoyée
+    (et, si ce n'est pas la 1re relance, la précédente doit déjà avoir été envoyée)."""
+    assert colonne in SEQUENCE_RELANCES
+    index = SEQUENCE_RELANCES.index(colonne)
+    precedente = SEQUENCE_RELANCES[index - 1] if index > 0 else None
+    condition_precedente = f"AND {precedente} = 1" if precedente else ""
     with connexion() as conn:
         rows = conn.execute(
             f"""SELECT * FROM users
                 WHERE completed = 0 AND en_cours = 1 AND webinaire = ?
-                  AND {colonne} = 0 {apres_10} AND updated_at <= ?""",
+                  AND {colonne} = 0 {condition_precedente} AND updated_at <= ?""",
             (webinaire, avant.strftime("%Y-%m-%d %H:%M:%S"))).fetchall()
     return [dict(r) for r in rows]
 

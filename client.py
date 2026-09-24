@@ -11,6 +11,7 @@ import asyncio
 import functools
 import html
 import os
+import random
 import re
 import unicodedata
 from datetime import datetime, timedelta
@@ -60,7 +61,8 @@ FREINS = ["Le manque de temps", "La peur de perdre de l'argent",
 TOLERANCE = timedelta(minutes=20)       # utilisé par admin.py : au-delà, un rappel en retard n'est plus envoyé
 PAUSE_ENVOI = 0.1                       # secondes entre deux envois (limite Telegram)
 A_COMPLETER = "À COMPLÉTER"             # un rappel contenant ce mot n'est jamais envoyé (admin.py)
-DELAI_VALIDATION = 5                    # secondes entre « je valide ta place » et les félicitations
+DELAI_VALIDATION_MIN = 2                # secondes minimum entre « je valide ta place » et les félicitations
+DELAI_VALIDATION_MAX = 4                # secondes maximum (durée tirée au hasard entre les deux, à chaque fois)
 
 FORMAT = "%Y-%m-%d %H:%M:%S"
 h = html.escape
@@ -372,7 +374,7 @@ async def demarrer_questionnaire(bot, uid):
         # Nouveau webinaire : on garde prénom / WhatsApp / Q3 / Q4 déjà connus,
         # mais la présence est à redonner (les anciennes réponses concernaient septembre).
         db.upsert_user(uid, webinaire=WEBINAIRE, presence=None, veut_j1=None, veut_j2=None,
-                       completed=0, relance10=0, relance30=0)
+                       completed=0, relance5=0, relance15=0, relance30=0)
     db.upsert_user(uid, en_cours=1)
 
     noter(uid, await ecrire(bot, uid, "<b>⏳ Confirmation de ta présence en cours…</b>"))
@@ -400,7 +402,8 @@ async def poser_question(bot, uid):
 
     if etape == "prenom":
         msg = await ecrire(bot, uid, f"{_titre(u, etape, '📝')}\n\n"
-                                     "Écris uniquement ton prénom ici, directement dans la discussion.\n\n"
+                                     "Quel est ton prénom ? 😊\n\n"
+                                     "Envoie-moi simplement ton prénom ici.\n"
                                      "Exemple : Charbel")
     elif etape == "whatsapp":
         msg = await ecrire(bot, uid, f"{_titre(u, etape, '📱')}\n\nQuel est ton numéro WhatsApp ?\n\n"
@@ -413,10 +416,14 @@ async def poser_question(bot, uid):
                            kb(*[(f, f"q:frein:{i}") for i, f in enumerate(FREINS)]))
     elif etape == "presence":
         noter(uid, await envoyer_sticker(bot, uid, "presence"))
-        msg = await ecrire(bot, uid, f"{_titre(u, etape, '🎯')}\n\nTa présence\n\n"
-                                     "⚠️ <i>En direct uniquement, pas de replay.</i>",
-                           kb((f"Je serai là les DEUX soirs, à {HEURE_LIVE}h", "q:presence:deux"),
-                              ("Je serai là un seul soir", "q:presence:un")))
+        msg = await ecrire(
+            bot, uid,
+            "<b>🎯 Dernière question !</b>\n\n"
+            f"{h(u.get('prenom') or '')}, ta présence est importante.\n\n"
+            "Seras-tu là les deux soirs ? ⚠️\n\n"
+            "Ça se passera en direct, il n'y aura pas de replay !",
+            kb((f"🔥 Oui, je serai là les DEUX soirs à {HEURE_LIVE}h", "q:presence:deux"),
+               ("Je pourrai être là un seul soir", "q:presence:un")))
     else:   # "soir"
         msg = await ecrire(bot, uid, "<b>📅 Lequel des deux soirs ?</b>",
                            kb(*[(JOURS[j]["nom"], f"q:soir:{j}") for j in JOURS]))
@@ -430,7 +437,7 @@ async def finaliser_inscription(bot, uid):
         u = db.get_user(uid)
         noter(uid, await ecrire(bot, uid, f"<b>✅ Tout est prêt, {h(u.get('prenom') or '')}.</b>\n\n"
                                           "Je suis en train de valider ta place…"))
-        await asyncio.sleep(DELAI_VALIDATION)
+        await asyncio.sleep(random.uniform(DELAI_VALIDATION_MIN, DELAI_VALIDATION_MAX))
         db.upsert_user(uid, completed=1, en_cours=0)
         await nettoyer(bot, uid)                # efface tout le parcours : vidéo, stickers, questions, réponses, relances
         await envoyer_confirmation(bot, uid)
