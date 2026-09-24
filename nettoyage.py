@@ -1,4 +1,4 @@
-    """
+"""
 Nettoyage du chat à la confirmation.
 
 Chaque message « décoratif » du parcours (vidéo d'accueil, sticker, « Il reste peu de places »,
