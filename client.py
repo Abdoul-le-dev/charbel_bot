@@ -436,8 +436,8 @@ async def demarrer_questionnaire(bot, uid):
 
     noter(uid, await ecrire(
         bot, uid,
-        "<b>🚀 Confirme ta place</b>\nFormation gratuite Trading Pour Tous\n\n"
-        f"📅 {JOURS[1]['nom']} et {JOURS[2]['nom']}, {HEURE_LIVE}h00 (heure du Bénin)\n"
+        "<b>Confirme ta place</b>\nFormation gratuite Trading Pour Tous\n\n"
+        f"📅 {JOURS[1]['nom']} et {JOURS[2]['nom']}, {HEURE_LIVE}h00 (heure du Bénin)\n\n"
         "🔴 En direct uniquement, places limitées."))
     noter(uid, await envoyer_sticker(bot, uid, "debut_questionnaire"))
 
@@ -464,19 +464,19 @@ async def poser_question(bot, uid):
                      kb(("🟢 Oui", "q:trade:Oui"), ("🔴 Non", "q:trade:Non")))
     elif etape == "frein":
         msg = await ecrire(bot, uid, "<b>🤔 Question 4 sur 5</b>\n\nQu'est-ce qui t'a empêché jusqu'ici de te lancer ?",
-                     kb(*[(f"🔵 {f}", f"q:frein:{i}") for i, f in enumerate(FREINS)]))
+                     kb(*[(f" {f}", f"q:frein:{i}") for i, f in enumerate(FREINS)]))
     elif etape == "presence":
         msg = await ecrire(bot, uid, "<b>🎯 Question 5 sur 5</b>\n\nTa présence\n\n"
                                "⚠️ <i>En direct uniquement, pas de replay.</i>",
-                     kb((f"🟢 Je serai là en direct les DEUX soirs, à {HEURE_LIVE}h", "q:presence:deux"),
-                        ("🟠 Je serai là un seul soir", "q:presence:un")))
+                     kb((f" Je serai là  les DEUX soirs, à {HEURE_LIVE}h", "q:presence:deux"),
+                        ("  Je serai là un seul soir", "q:presence:un")))
     elif etape == "soir":
         msg = await ecrire(bot, uid, "<b>📅 Lequel des deux soirs ?</b>",
-                     kb(*[(f"🔵 {JOURS[j]['nom']}", f"q:soir:{j}") for j in JOURS]))
+                     kb(*[(f" {JOURS[j]['nom']}", f"q:soir:{j}") for j in JOURS]))
     else:
         msg = await ecrire(bot, uid, f"<b>✅ Tout est prêt, {h(u.get('prenom') or '')}.</b>\n\n"
                                "Il ne reste qu'un clic pour verrouiller ta place.",
-                     kb(("🟢 Confirmer ma place", "q:confirme:1")))
+                     kb((" ✅ Je valide ma place", "q:confirme:1")))
 
     DERNIERE_QUESTION[uid] = msg.message_id
 
@@ -588,10 +588,10 @@ async def envoyer_bienvenue(bot, uid, lien_entree=None):
     db.upsert_user(uid, categorie=db.derniere_categorie())
 
     legende = (
-        "<b>👋 Bienvenue dans Trading Pour Tous</b>\n\n"
+        "<b>Bienvenue dans Trading Pour Tous</b>\n\n"
         "Tu es sur le point de réserver ta place à la formation gratuite.\n\n"
         f"<b>📅 Dates</b>\n{JOURS[1]['nom']} et {JOURS[2]['nom']}, à {HEURE_LIVE}h00 (heure du Bénin)\n\n"
-        "<b>🔴 Format</b>\nEn direct uniquement. Places limitées.")
+        "<b>🔴 Format</b>\nEn direct uniquement.")
     noter(uid, await envoyer_video(bot, uid, VIDEO_BIENVENUE, legende, nom="welcomes_222", parse_mode="HTML"))
     noter(uid, await envoyer_sticker(bot, uid, "bienvenue"))
     noter(uid, await ecrire(bot, uid, "<b>⚠️ Il reste peu de places.</b>\n\nClique ci-dessous pour confirmer la tienne.",
