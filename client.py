@@ -61,6 +61,9 @@ FREINS = ["Le manque de temps", "La peur de perdre de l'argent",
 TOLERANCE = timedelta(minutes=20)       # utilisé par admin.py : au-delà, un rappel en retard n'est plus envoyé
 PAUSE_ENVOI = 0.1                       # secondes entre deux envois (limite Telegram)
 A_COMPLETER = "À COMPLÉTER"             # un rappel contenant ce mot n'est jamais envoyé (admin.py)
+DATE_LANCEMENT_RELANCES = "2026-09-24 00:00:00"   # les relances automatiques ne concernent QUE les personnes
+                                                    # créées à partir de cette date (pas les anciens réinvités)
+HEURE_RAPPORT = 21                      # heure du Bénin à laquelle le bilan quotidien (+ erreurs du jour) est envoyé
 DELAI_VALIDATION_MIN = 2                # secondes minimum entre « je valide ta place » et les félicitations
 DELAI_VALIDATION_MAX = 4                # secondes maximum (durée tirée au hasard entre les deux, à chaque fois)
 

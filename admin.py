@@ -7,7 +7,6 @@ Pour le lancement du bot (main) : voir main.py   →   python main.py
 """
 import asyncio
 import io
-import os
 from collections import Counter
 from datetime import datetime, timedelta
 
@@ -17,10 +16,10 @@ from telegram.ext import Application, ContextTypes, ConversationHandler
 from database import database as db
 
 from client import (
-    A_COMPLETER, ADMIN_IDS, DUREE_LIVE, FORMAT, FREINS, HEURE_LIVE, JOURS, PAUSE_ENVOI,
-    SEUILS, TOLERANCE, VIDEO_RELANCE, WEBINAIRE,
+    A_COMPLETER, DATE_LANCEMENT_RELANCES, DUREE_LIVE, FORMAT, FREINS, HEURE_LIVE,
+    HEURE_RAPPORT, JOURS, PAUSE_ENVOI, SEUILS, TOLERANCE, VIDEO_RELANCE, WEBINAIRE,
     admin_seulement, debut_live, envoyer_video, kb, kb_demarrer, lancer, normaliser,
-    prevenir_admins, restantes,
+    prevenir_admins, prochaine_etape, restantes,
 )
 from nettoyage import noter
 
@@ -147,8 +146,10 @@ async def envoyer_rappel(bot, rappel):
 
 
 async def envoyer_relance(bot, u, colonne):
-    """+10 min : texte. +30 min : même texte avec la vidéo de bienvenue.
-    Le message est mémorisé (noter) pour être effacé quand la personne confirme sa place."""
+    """5 min et 15 min : texte seul. 30 min : même texte avec la vidéo de bienvenue.
+    Après la 3e relance (30 min) sans réponse, la personne n'est plus relancée automatiquement.
+    Le message est mémorisé (noter) pour être effacé quand la personne confirme sa place,
+    et l'envoi est enregistré (suivi) pour être compté dans le bilan quotidien."""
     n = restantes(u)
     reste = ("il ne te reste qu'un clic pour confirmer ta place" if n == 0
              else f"il te reste {n} question{'s' if n > 1 else ''} pour confirmer ta place")
@@ -159,11 +160,16 @@ async def envoyer_relance(bot, u, colonne):
     else:
         msg = await bot.send_message(chat_id=u["telegram_id"], text=texte, reply_markup=markup)
     noter(u["telegram_id"], msg)
+    db.enregistrer_suivi(u["telegram_id"], "relance", detail=colonne)
 
 
 async def relancer_incomplets(bot, maintenant):
-    for colonne, minutes in (("relance10", 10), ("relance30", 30)):
-        for u in db.users_a_relancer(WEBINAIRE, colonne, maintenant - timedelta(minutes=minutes)):
+    """Relances automatiques : UNIQUEMENT les personnes créées à partir de DATE_LANCEMENT_RELANCES
+    (les anciens réinvités ne reçoivent que les messages de masse / rappels planifiés)."""
+    for colonne, minutes in (("relance5", 5), ("relance15", 15), ("relance30", 30)):
+        cibles = db.users_a_relancer(WEBINAIRE, colonne, maintenant - timedelta(minutes=minutes),
+                                     DATE_LANCEMENT_RELANCES)
+        for u in cibles:
             db.marquer_relance(u["telegram_id"], colonne)          # d'abord : jamais deux envois
             try:
                 await envoyer_relance(bot, u, colonne)
@@ -173,7 +179,8 @@ async def relancer_incomplets(bot, maintenant):
 
 
 async def tick(bot, maintenant=None):
-    """Appelée toutes les 30 s : envoie les rappels dont l'heure est arrivée, puis les relances."""
+    """Appelée toutes les 30 s : envoie les rappels dont l'heure est arrivée, puis les relances,
+    puis vérifie s'il est l'heure d'envoyer le bilan quotidien."""
     maintenant = maintenant or db.now_benin()
     for r in db.rappels_a_traiter(maintenant.strftime(FORMAT)):
         retard = maintenant - datetime.strptime(r["date_envoi"], FORMAT)
@@ -190,6 +197,7 @@ async def tick(bot, maintenant=None):
             db.set_statut_rappel(r["id"], db.ENVOYE)
             await envoyer_rappel(bot, r)
     await relancer_incomplets(bot, maintenant)
+    await verifier_rapport_quotidien(bot, maintenant)
 
 
 async def boucle_planificateur(bot):
@@ -203,6 +211,88 @@ async def boucle_planificateur(bot):
 
 async def demarrer_planificateur(app: Application):
     lancer(boucle_planificateur(app.bot))
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# BILAN QUOTIDIEN — envoyé une fois par jour à HEURE_RAPPORT (heure du Bénin),
+# avec le détail des erreurs survenues dans la journée.
+# ════════════════════════════════════════════════════════════════════════════
+
+def _pourcentage(n, total) -> str:
+    return f"{(n / total * 100):.1f}%" if total else "0.0%"
+
+
+ETAPES_FUNNEL = [("prenom", "Prénom"), ("whatsapp", "WhatsApp"), ("trade", "Trading"),
+                 ("frein", "Frein"), ("presence", "Présence")]
+
+
+def _compter_funnel(depuis: str) -> dict:
+    """Regroupe les personnes non terminées par étape où elles sont bloquées.
+    'soir' et 'confirmation' (juste après la présence) sont comptées avec 'presence'."""
+    buckets = {cle: 0 for cle, _ in ETAPES_FUNNEL}
+    for u in db.users_non_completes(depuis):
+        etape = prochaine_etape(u)
+        if etape in ("soir", "confirmation"):
+            etape = "presence"
+        if etape in buckets:
+            buckets[etape] += 1
+    return buckets
+
+
+async def generer_rapport_quotidien(bot, maintenant):
+    aujourdhui = maintenant.strftime("%Y-%m-%d")
+    debut_semaine = (maintenant - timedelta(days=6)).strftime("%Y-%m-%d")   # 7 derniers jours glissants
+
+    approb_jour, compl_jour = db.compter_approbations(aujourdhui, aujourdhui), db.compter_completions(aujourdhui, aujourdhui)
+    approb_semaine = db.compter_approbations(debut_semaine, aujourdhui)
+    compl_semaine = db.compter_completions(debut_semaine, aujourdhui)
+    relances_jour = db.compter_relances(aujourdhui, aujourdhui)
+
+    funnel = _compter_funnel(DATE_LANCEMENT_RELANCES)
+    total_depuis_lancement = db.compter_membres_depuis(DATE_LANCEMENT_RELANCES)
+    total_bloque = sum(funnel.values())
+
+    lignes_funnel = "\n".join(
+        f"• Bloqués à l'étape {libelle} : {funnel[cle]} ({_pourcentage(funnel[cle], total_depuis_lancement)})"
+        for cle, libelle in ETAPES_FUNNEL)
+
+    texte = (
+        f"📊 Bilan quotidien — {maintenant:%d/%m/%Y}\n"
+        "━━━━━━━━━━━━━━━━━━━━\n\n"
+        "🆕 Aujourd'hui\n"
+        f"• Nouvelles demandes approuvées : {approb_jour}\n"
+        f"• Nouvelles inscriptions complètes : {compl_jour}\n"
+        f"• Taux de complétion du jour : {_pourcentage(compl_jour, approb_jour)}\n"
+        f"• Relances envoyées : {relances_jour}\n\n"
+        "📆 Cette semaine (7 derniers jours)\n"
+        f"• Nouvelles demandes approuvées : {approb_semaine}\n"
+        f"• Nouvelles inscriptions complètes : {compl_semaine}\n"
+        f"• Taux de complétion de la semaine : {_pourcentage(compl_semaine, approb_semaine)}\n\n"
+        f"🚨 Funnel — points de blocage (depuis le {DATE_LANCEMENT_RELANCES[:10]})\n"
+        f"{lignes_funnel}\n"
+        f"• Total bloqués : {total_bloque}")
+
+    erreurs = db.erreurs_non_envoyees()
+    if erreurs:
+        lignes_erreurs = "\n".join(
+            f"• {e['survenue_le'][11:]} — {e['type_erreur']} (user {e['utilisateur']}) : {e['message'][:150]}"
+            for e in erreurs)
+        texte += f"\n\n🐞 Erreurs du jour ({len(erreurs)})\n{lignes_erreurs}"
+    else:
+        texte += "\n\n✅ Aucune erreur aujourd'hui."
+
+    await prevenir_admins(bot, texte)
+    db.marquer_erreurs_envoyees()
+
+
+async def verifier_rapport_quotidien(bot, maintenant):
+    aujourdhui = maintenant.strftime("%Y-%m-%d")
+    if maintenant.hour >= HEURE_RAPPORT and not db.rapport_deja_envoye(aujourdhui):
+        db.marquer_rapport_envoye(aujourdhui)          # d'abord : jamais deux envois le même jour
+        try:
+            await generer_rapport_quotidien(bot, maintenant)
+        except Exception as e:
+            print(f"Bilan quotidien : {e}")
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -438,9 +528,8 @@ async def cmd_categorie(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 # ════════════════════════════════════════════════════════════════════════════
 # GESTION DES ERREURS
-# On ne renvoie plus toute la trace complète aux admins : juste l'essentiel (utilisateur + type
-# d'erreur + message), écrit dans un petit fichier, envoyé, puis supprimé du disque après l'envoi.
-# La trace complète reste dans les logs du serveur (print), pour un vrai debug si besoin.
+# On n'envoie plus rien aux admins immédiatement : chaque erreur est journalisée (logs serveur
+# + base de données) et sera détaillée une seule fois, dans le bilan quotidien de HEURE_RAPPORT.
 # ════════════════════════════════════════════════════════════════════════════
 
 async def error_handler(update: object, ctx: ContextTypes.DEFAULT_TYPE):
@@ -451,17 +540,5 @@ async def error_handler(update: object, ctx: ContextTypes.DEFAULT_TYPE):
     type_erreur = type(ctx.error).__name__
     message = str(ctx.error) or "(pas de message)"
 
-    print(f"[ERREUR] {type_erreur} — user={qui} — {message}")   # trace complète : uniquement dans les logs serveur
-
-    chemin = f"erreur_{datetime.now():%Y%m%d_%H%M%S}.txt"
-    with open(chemin, "w", encoding="utf-8") as f:
-        f.write(f"Utilisateur : {qui}\nType d'erreur : {type_erreur}\nMessage : {message}\n")
-
-    try:
-        for admin_id in ADMIN_IDS:
-            with open(chemin, "rb") as f:
-                await ctx.bot.send_document(chat_id=admin_id, document=f, filename=chemin,
-                                            caption="⚠️ Erreur bot")
-    finally:
-        if os.path.exists(chemin):
-            os.remove(chemin)
+    print(f"[ERREUR] {type_erreur} — user={qui} — {message}")   # trace complète : toujours dans les logs serveur
+    db.log_erreur(qui, type_erreur, message)

@@ -108,6 +108,19 @@ CREATE TABLE IF NOT EXISTS rappels (
     bouton     TEXT,
     statut     INTEGER DEFAULT 0
 );
+-- Erreurs du bot : journalisées ici plutôt qu'envoyées immédiatement, détaillées dans le bilan de 21h
+CREATE TABLE IF NOT EXISTS erreurs (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    utilisateur TEXT,
+    type_erreur TEXT,
+    message     TEXT,
+    survenue_le TEXT NOT NULL,
+    envoyee     INTEGER DEFAULT 0
+);
+-- Une ligne par jour où le bilan quotidien a été envoyé (empêche un double envoi)
+CREATE TABLE IF NOT EXISTS rapports_envoyes (
+    date TEXT PRIMARY KEY
+);
 """
 
 # Colonnes ajoutées aux anciennes bases (ignorées si elles existent déjà)
@@ -208,9 +221,11 @@ def marquer_relance(telegram_id, colonne):
         conn.execute(f"UPDATE users SET {colonne} = 1 WHERE telegram_id = ?", (telegram_id,))
 
 
-def users_a_relancer(webinaire, colonne, avant: datetime) -> list[dict]:
+def users_a_relancer(webinaire, colonne, avant: datetime, inscrits_depuis: str) -> list[dict]:
     """Questionnaire commencé, pas terminé, sans activité depuis `avant`, relance pas encore envoyée
-    (et, si ce n'est pas la 1re relance, la précédente doit déjà avoir été envoyée)."""
+    (et, si ce n'est pas la 1re relance, la précédente doit déjà avoir été envoyée).
+    Ne concerne QUE les personnes créées à partir de `inscrits_depuis` (pas les anciens réinvités,
+    qui reçoivent uniquement les messages de masse / rappels planifiés, jamais les relances auto)."""
     assert colonne in SEQUENCE_RELANCES
     index = SEQUENCE_RELANCES.index(colonne)
     precedente = SEQUENCE_RELANCES[index - 1] if index > 0 else None
@@ -219,8 +234,18 @@ def users_a_relancer(webinaire, colonne, avant: datetime) -> list[dict]:
         rows = conn.execute(
             f"""SELECT * FROM users
                 WHERE completed = 0 AND en_cours = 1 AND webinaire = ?
-                  AND {colonne} = 0 {condition_precedente} AND updated_at <= ?""",
-            (webinaire, avant.strftime("%Y-%m-%d %H:%M:%S"))).fetchall()
+                  AND {colonne} = 0 {condition_precedente}
+                  AND updated_at <= ? AND created_at >= ?""",
+            (webinaire, avant.strftime("%Y-%m-%d %H:%M:%S"), inscrits_depuis)).fetchall()
+    return [dict(r) for r in rows]
+
+
+def users_non_completes(depuis: str) -> list[dict]:
+    """Toutes les personnes créées à partir de `depuis` qui n'ont pas terminé le questionnaire
+    (utilisé pour le funnel de blocage du bilan quotidien)."""
+    with connexion() as conn:
+        rows = conn.execute(
+            "SELECT * FROM users WHERE completed = 0 AND created_at >= ?", (depuis,)).fetchall()
     return [dict(r) for r in rows]
 
 
@@ -396,6 +421,85 @@ def rappels_a_traiter(maintenant: str) -> list[dict]:
         rows = conn.execute("SELECT * FROM rappels WHERE statut = ? AND date_envoi <= ? "
                             "ORDER BY date_envoi, id", (PLANIFIE, maintenant)).fetchall()
     return [dict(r) for r in rows]
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# BILAN QUOTIDIEN — comptages par période
+# ════════════════════════════════════════════════════════════════════════════
+
+def _plage(date_debut: str, date_fin: str) -> tuple[str, str]:
+    """('2026-09-24', '2026-09-24') -> bornes datetime ['2026-09-24 00:00:00', '2026-09-25 00:00:00')."""
+    fin_exclusive = datetime.strptime(date_fin, "%Y-%m-%d") + timedelta(days=1)
+    return f"{date_debut} 00:00:00", fin_exclusive.strftime("%Y-%m-%d 00:00:00")
+
+
+def compter_approbations(date_debut: str, date_fin: str) -> int:
+    """Nombre de demandes d'adhésion approuvées (arrivées dans le canal) sur la période."""
+    debut, fin = _plage(date_debut, date_fin)
+    with connexion() as conn:
+        return conn.execute(
+            "SELECT COUNT(*) FROM members_log WHERE joined_at >= ? AND joined_at < ?",
+            (debut, fin)).fetchone()[0]
+
+
+def compter_completions(date_debut: str, date_fin: str) -> int:
+    """Nombre d'inscriptions terminées (questionnaire complet) sur la période."""
+    debut, fin = _plage(date_debut, date_fin)
+    with connexion() as conn:
+        return conn.execute(
+            "SELECT COUNT(*) FROM users WHERE completed = 1 AND updated_at >= ? AND updated_at < ?",
+            (debut, fin)).fetchone()[0]
+
+
+def compter_relances(date_debut: str, date_fin: str) -> int:
+    """Nombre de relances automatiques envoyées sur la période."""
+    debut, fin = _plage(date_debut, date_fin)
+    with connexion() as conn:
+        return conn.execute(
+            "SELECT COUNT(*) FROM suivi WHERE type = 'relance' AND created_at >= ? AND created_at < ?",
+            (debut, fin)).fetchone()[0]
+
+
+def compter_membres_depuis(depuis: str) -> int:
+    """Nombre total de personnes créées à partir de `depuis` (toutes, complétées ou non)."""
+    with connexion() as conn:
+        return conn.execute("SELECT COUNT(*) FROM users WHERE created_at >= ?", (depuis,)).fetchone()[0]
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# ERREURS — journalisées, détaillées une fois par jour dans le bilan (pas d'envoi immédiat)
+# ════════════════════════════════════════════════════════════════════════════
+
+def log_erreur(utilisateur, type_erreur, message):
+    with connexion() as conn:
+        conn.execute(
+            "INSERT INTO erreurs (utilisateur, type_erreur, message, survenue_le) VALUES (?, ?, ?, ?)",
+            (utilisateur, type_erreur, message, _maintenant()))
+
+
+def erreurs_non_envoyees() -> list[dict]:
+    with connexion() as conn:
+        return [dict(r) for r in conn.execute(
+            "SELECT * FROM erreurs WHERE envoyee = 0 ORDER BY survenue_le")]
+
+
+def marquer_erreurs_envoyees():
+    with connexion() as conn:
+        conn.execute("UPDATE erreurs SET envoyee = 1 WHERE envoyee = 0")
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# BILAN QUOTIDIEN — anti double-envoi
+# ════════════════════════════════════════════════════════════════════════════
+
+def rapport_deja_envoye(date: str) -> bool:
+    with connexion() as conn:
+        return conn.execute("SELECT 1 FROM rapports_envoyes WHERE date = ?", (date,)).fetchone() is not None
+
+
+def marquer_rapport_envoye(date: str):
+    with connexion() as conn:
+        conn.execute("INSERT OR IGNORE INTO rapports_envoyes (date) VALUES (?)", (date,))
 
 
 # ════════════════════════════════════════════════════════════════════════════
