@@ -16,7 +16,7 @@ from client import (
 )
 from admin import (
     CHOIX_CIBLE, RECEVOIR_MESSAGE,
-    annuler, choisir_cible, cmd_aide, cmd_categorie, cmd_codes, cmd_dates, cmd_envoyer,
+    annuler, choisir_cible, cmd_aide, cmd_categorie, cmd_codes, cmd_dates, cmd_envoyer, cmd_rattacher,
     cmd_envoyer_rappel, cmd_export, cmd_modifier, cmd_rappels, cmd_stats,
     cmd_tester_rappel, demarrer_planificateur, error_handler, planifier_rappels, recevoir_message,
 )
@@ -43,7 +43,8 @@ def main():
     for nom, fonction in [("aide", cmd_aide), ("stats", cmd_stats), ("rappels", cmd_rappels),
                           ("modifier", cmd_modifier), ("tester_rappel", cmd_tester_rappel),
                           ("envoyer_rappel", cmd_envoyer_rappel), ("codes", cmd_codes),
-                          ("dates", cmd_dates), ("nouvelle_categorie", cmd_categorie)]:
+                          ("dates", cmd_dates), ("rattacher", cmd_rattacher),
+                          ("nouvelle_categorie", cmd_categorie)]:
         app.add_handler(CommandHandler(nom, fonction))
 
     app.add_handler(ConversationHandler(
