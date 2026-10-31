@@ -117,6 +117,19 @@ CREATE TABLE IF NOT EXISTS erreurs (
     survenue_le TEXT NOT NULL,
     envoyee     INTEGER DEFAULT 0
 );
+-- Une ligne par événement (webinaire = date du mercredi, ex '2026-11-04')
+CREATE TABLE IF NOT EXISTS sessions (
+    webinaire      TEXT PRIMARY KEY,
+    enregistree_le TEXT NOT NULL
+);
+-- Historique : une ligne par personne ET par événement confirmé (jamais écrasée quand la personne
+-- se réinscrit au suivant, contrairement à la colonne users.webinaire)
+CREATE TABLE IF NOT EXISTS inscriptions (
+    telegram_id INTEGER,
+    webinaire   TEXT,
+    confirme_le TEXT NOT NULL,
+    PRIMARY KEY (telegram_id, webinaire)
+);
 -- Une ligne par jour où le bilan quotidien a été envoyé (empêche un double envoi)
 CREATE TABLE IF NOT EXISTS rapports_envoyes (
     date TEXT PRIMARY KEY
@@ -139,7 +152,11 @@ COLONNES_USERS = {
     "relance5_le": "TEXT",      # date/heure d'envoi de la relance à 5 min (NULL = pas encore envoyée)
     "relance15_le": "TEXT",     # idem pour la relance à 15 min (envoyée 10 min après relance5_le)
     "relance30_le": "TEXT",     # idem pour la relance à 30 min (envoyée 15 min après relance15_le)
+    "confirme_le": "TEXT",      # date/heure de confirmation de l'inscription en cours
 }
+
+# Événement déjà passé avant la création de la table sessions (pour situer le début de la campagne suivante)
+SESSIONS_HISTORIQUES = ["2026-09-30"]
 
 
 def _ajouter_colonnes(conn, table, colonnes):
@@ -154,6 +171,13 @@ def init_db(categorie_defaut="Webinaire 30 septembre - 1er octobre 2026"):
         conn.executescript(SCHEMA)
         _ajouter_colonnes(conn, "users", COLONNES_USERS)
         _ajouter_colonnes(conn, "members_log", {"lien_entree": "TEXT"})
+        # Reprise de l'existant (sans effet les fois suivantes)
+        conn.execute("UPDATE users SET confirme_le = updated_at WHERE completed = 1 AND confirme_le IS NULL")
+        conn.executemany("INSERT OR IGNORE INTO sessions (webinaire, enregistree_le) VALUES (?, ?)",
+                         [(w, _maintenant()) for w in SESSIONS_HISTORIQUES])
+        conn.execute("""INSERT OR IGNORE INTO inscriptions (telegram_id, webinaire, confirme_le)
+                        SELECT telegram_id, webinaire, confirme_le FROM users
+                        WHERE completed = 1 AND webinaire IS NOT NULL""")
         if not conn.execute("SELECT 1 FROM categories").fetchone():
             conn.execute("INSERT INTO categories (nom, creee_le) VALUES (?, ?)",
                          (categorie_defaut, _maintenant()))
@@ -179,6 +203,16 @@ def upsert_user(telegram_id, **champs):
             colonnes = ", ".join(champs)
             marques = ", ".join("?" * len(champs))
             conn.execute(f"INSERT INTO users ({colonnes}) VALUES ({marques})", tuple(champs.values()))
+
+
+def marquer_confirme(telegram_id, webinaire):
+    """Inscription terminée : on note quand, et on l'ajoute à l'historique de cet événement."""
+    quand = _maintenant()
+    with connexion() as conn:
+        conn.execute("UPDATE users SET completed = 1, en_cours = 0, confirme_le = ?, updated_at = ? "
+                     "WHERE telegram_id = ?", (quand, quand, telegram_id))
+        conn.execute("INSERT OR IGNORE INTO inscriptions (telegram_id, webinaire, confirme_le) VALUES (?, ?, ?)",
+                     (telegram_id, webinaire, quand))
 
 
 def get_user(telegram_id) -> dict | None:
@@ -383,12 +417,21 @@ def users_a_rattacher(webinaire, depuis: str) -> list[dict]:
     return [dict(r) for r in rows]
 
 
-def rattacher_users(ids, webinaire):
-    """Rattache ces personnes à la session `webinaire`, en gardant toutes leurs réponses
-    (y compris le choix des soirs). updated_at n'est pas modifié (sert aux stats de complétion)."""
+def rattacher_users(personnes, webinaire):
+    """personnes = lignes renvoyées par users_a_rattacher. Les rattache à la session `webinaire`,
+    en gardant toutes leurs réponses (y compris le choix des soirs) et leur date de confirmation.
+    Dans l'historique, leur inscription est déplacée de l'ancienne session vers celle-ci."""
     with connexion() as conn:
-        conn.executemany("UPDATE users SET webinaire = ? WHERE telegram_id = ?",
-                         [(webinaire, uid) for uid in ids])
+        for p in personnes:
+            uid = p["telegram_id"]
+            conn.execute("UPDATE users SET webinaire = ?, confirme_le = COALESCE(confirme_le, updated_at) "
+                         "WHERE telegram_id = ?", (webinaire, uid))
+            if p["webinaire"]:
+                conn.execute("DELETE FROM inscriptions WHERE telegram_id = ? AND webinaire = ?",
+                             (uid, p["webinaire"]))
+            conn.execute("""INSERT OR IGNORE INTO inscriptions (telegram_id, webinaire, confirme_le)
+                            SELECT telegram_id, ?, confirme_le FROM users WHERE telegram_id = ?""",
+                         (webinaire, uid))
 
 
 def ids_septembre() -> list[int]:
@@ -491,7 +534,7 @@ def compter_completions(date_debut: str, date_fin: str) -> int:
     debut, fin = _plage(date_debut, date_fin)
     with connexion() as conn:
         return conn.execute(
-            "SELECT COUNT(*) FROM users WHERE completed = 1 AND updated_at >= ? AND updated_at < ?",
+            "SELECT COUNT(*) FROM inscriptions WHERE confirme_le >= ? AND confirme_le < ?",
             (debut, fin)).fetchone()[0]
 
 
@@ -508,6 +551,81 @@ def compter_membres_depuis(depuis: str) -> int:
     """Nombre total de personnes créées à partir de `depuis` (toutes, complétées ou non)."""
     with connexion() as conn:
         return conn.execute("SELECT COUNT(*) FROM users WHERE created_at >= ?", (depuis,)).fetchone()[0]
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# STATISTIQUES PAR ÉVÉNEMENT (/stats) ET GLOBALES (/stats global)
+# ════════════════════════════════════════════════════════════════════════════
+
+def enregistrer_session(webinaire):
+    with connexion() as conn:
+        conn.execute("INSERT OR IGNORE INTO sessions (webinaire, enregistree_le) VALUES (?, ?)",
+                     (webinaire, _maintenant()))
+
+
+def lister_sessions() -> list[str]:
+    with connexion() as conn:
+        return [r[0] for r in conn.execute("SELECT webinaire FROM sessions ORDER BY webinaire DESC")]
+
+
+def session_precedente(webinaire) -> str | None:
+    with connexion() as conn:
+        return conn.execute("SELECT MAX(webinaire) FROM sessions WHERE webinaire < ?", (webinaire,)).fetchone()[0]
+
+
+def premieres_venues(debut: str, fin: str) -> dict:
+    """{telegram_id: date de 1re venue} pour les personnes venues pour la PREMIÈRE fois dans [debut, fin)
+    (1re venue = arrivée dans le canal ou 1er contact avec le bot, la plus ancienne des deux)."""
+    with connexion() as conn:
+        rows = conn.execute(
+            """SELECT telegram_id, MIN(d) AS premiere FROM (
+                   SELECT telegram_id, joined_at AS d FROM members_log
+                   UNION ALL
+                   SELECT telegram_id, created_at FROM users WHERE telegram_id IS NOT NULL)
+               GROUP BY telegram_id HAVING premiere >= ? AND premiere < ?""", (debut, fin)).fetchall()
+    return {r["telegram_id"]: r["premiere"] for r in rows}
+
+
+def ids_actifs(debut: str, fin: str) -> set:
+    """Personnes ayant interagi avec le bot (/start, bouton, message) dans [debut, fin)."""
+    with connexion() as conn:
+        return {r[0] for r in conn.execute(
+            "SELECT telegram_id FROM users WHERE last_seen >= ? AND last_seen < ?", (debut, fin))}
+
+
+def users_de_session(webinaire) -> list[dict]:
+    """Personnes ayant commencé (ou fini) l'inscription pour cet événement."""
+    with connexion() as conn:
+        return [dict(r) for r in conn.execute("SELECT * FROM users WHERE webinaire = ?", (webinaire,))]
+
+
+def confirmations_par_jour(webinaire) -> dict:
+    with connexion() as conn:
+        return {r[0]: r[1] for r in conn.execute(
+            "SELECT substr(confirme_le, 1, 10), COUNT(*) FROM inscriptions WHERE webinaire = ? GROUP BY 1",
+            (webinaire,))}
+
+
+def compter_inscriptions_par_session() -> dict:
+    with connexion() as conn:
+        return {r[0]: r[1] for r in conn.execute(
+            "SELECT webinaire, COUNT(*) FROM inscriptions GROUP BY webinaire")}
+
+
+def compter_confirmes_distincts() -> int:
+    """Personnes ayant confirmé au moins une fois, tous événements confondus (comptées une seule fois)."""
+    with connexion() as conn:
+        return conn.execute("""SELECT COUNT(*) FROM (
+                                   SELECT telegram_id FROM inscriptions
+                                   UNION SELECT telegram_id FROM users WHERE completed = 1)""").fetchone()[0]
+
+
+def liens_entree(debut: str, fin: str) -> dict:
+    with connexion() as conn:
+        rows = conn.execute("""SELECT COALESCE(lien_entree, '(sans lien)') AS lien, COUNT(*) AS n
+                               FROM members_log WHERE joined_at >= ? AND joined_at < ?
+                               GROUP BY lien ORDER BY n DESC""", (debut, fin)).fetchall()
+    return {r["lien"]: r["n"] for r in rows}
 
 
 # ════════════════════════════════════════════════════════════════════════════

@@ -124,6 +124,7 @@ PLANNING = construire_planning()        # gardé pour main.py
 def planifier_rappels() -> int:
     """Ajoute en base les rappels des dates actuelles qui n'y sont pas encore (même nom + même date).
     Retourne le nombre de rappels réellement ajoutés. Sans risque de doublon : appelable à chaque démarrage."""
+    db.enregistrer_session(webinaire())         # l'événement en cours est mémorisé pour les stats
     existants = {(r["nom"], r["date_envoi"]) for r in db.get_rappels()}
     nouveaux = [r for r in construire_planning() if (r[0], r[2]) not in existants]
     if not nouveaux:
@@ -336,7 +337,8 @@ async def cmd_aide(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "/export — exporter un tableau Excel (tu choisis la cible)\n"
         "/dates — voir ou changer les dates du webinaire\n"
         "/rattacher JJ/MM/AAAA — rattacher à la session actuelle ceux inscrits depuis cette date\n"
-        "/stats — statistiques\n"
+        "/stats — statistiques de l'événement en cours\n"
+        "/stats global — statistiques de tous les événements\n"
         "/nouvelle_categorie <nom>")
 
 
@@ -440,7 +442,7 @@ async def cmd_dates(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             "• c'est une NOUVELLE session : les inscrits actuels devront reconfirmer leur place "
             "(prénom, WhatsApp et réponses Q3/Q4 sont gardés)\n"
             "• les rappels des deux nouveaux soirs sont planifiés\n"
-            "• les stats et cibles « présents / absents » portent sur les nouveaux soirs\n\n"
+            "• /stats affichera les chiffres de ce nouvel événement (l'historique reste dans /stats global)\n\n"
             f"Pour valider : /dates {saisie} oui")
         return
 
@@ -501,7 +503,7 @@ async def cmd_rattacher(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             f"Pour valider : /rattacher {ctx.args[0]} oui")
         return
 
-    db.rattacher_users([p["telegram_id"] for p in personnes], session)
+    db.rattacher_users(personnes, session)
     await update.message.reply_text(
         f"✅ {len(personnes)} personnes rattachées à la session du {JOURS[1]['nom']} / {JOURS[2]['nom']}.\n\n"
         f"Confirmés au total : {len(db.ids_confirmes(session))}. Vérifie avec /stats.")
@@ -629,26 +631,135 @@ async def exporter(update, cle):
 # COMMANDES ADMIN — /stats et catégories
 # ════════════════════════════════════════════════════════════════════════════
 
-@admin_seulement
-async def cmd_stats(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    def bloc(dictionnaire):
-        return "\n".join(f"  • {k} : {v}" for k, v in dictionnaire.items()) or "  (aucun)"
+# Un jour avec au moins SEUIL_REPRISE nouvelles arrivées = la pub a repris (début réel de la campagne).
+SEUIL_REPRISE = 10
+NB_JOURS_DETAIL = 14            # nombre max de jours affichés dans le « jour par jour »
 
-    tous, confirmes = db.ids_tous(), db.ids_confirmes(webinaire())
+
+def _fin_evenement(session) -> datetime:
+    """Fin du 2e soir d'un événement (session = date du mercredi)."""
+    return datetime.strptime(session, "%Y-%m-%d") + timedelta(days=1, hours=HEURE_LIVE + DUREE_LIVE)
+
+
+def _nom_session(session) -> str:
+    mercredi = date.fromisoformat(session)
+    jeudi = mercredi + timedelta(days=1)
+    return f"{nom_date(mercredi)} – {nom_date(jeudi)} {jeudi.year}"
+
+
+def _bloc(dictionnaire) -> str:
+    return "\n".join(f"  • {k} : {v}" for k, v in dictionnaire.items()) or "  (aucun)"
+
+
+def stats_evenement() -> str:
+    """Tout ce qui concerne l'événement en cours, et rien d'autre.
+    Sa campagne commence à la fin de l'événement précédent : toute personne venue pour la 1re fois
+    depuis est comptée pour celui-ci."""
+    session = webinaire()
+    maintenant = db.now_benin()
+    precedente = db.session_precedente(session)
+    debut = _fin_evenement(precedente) if precedente else datetime(2000, 1, 1)
+    fin_evt = _fin_evenement(session)
+    borne = min(maintenant, fin_evt)
+    d, b = debut.strftime(FORMAT), borne.strftime(FORMAT)
+
+    # Qui est venu pour cet événement
+    nouveaux = db.premieres_venues(d, b)
+    inscrits = db.users_de_session(session)
+    ids_session = {u["telegram_id"] for u in inscrits}
+    revenus = (db.ids_actifs(d, b) | ids_session) - set(nouveaux)
+    venus = len(nouveaux) + len(revenus)
+    confirmes = [u for u in inscrits if u.get("completed") == 1]
+    # Ont commencé sans finir : inscription en cours pour cet événement, ou commencée pendant la campagne
+    # (y compris avec une ancienne version du bot, qui les enregistrait sous une autre session)
+    candidats = {u["telegram_id"]: u for u in db.users_non_completes(d) if u["created_at"] < b}
+    candidats.update({u["telegram_id"]: u for u in inscrits if u.get("completed") != 1})
+    en_cours = [u for u in candidats.values()
+                if u.get("en_cours") or u.get("prenom") or u.get("webinaire") == session]
+
+    # Détection de la reprise de la pub
+    arrivees_jour = Counter(v[:10] for v in nouveaux.values())
+    reprise = next((j for j in sorted(arrivees_jour) if arrivees_jour[j] >= SEUIL_REPRISE), None)
+    if reprise:
+        calme = sum(n for j, n in arrivees_jour.items() if j < reprise)
+        ligne_reprise = (f"• Reprise détectée le {reprise[8:10]}/{reprise[5:7]} "
+                         f"({arrivees_jour[reprise]} arrivées ce jour-là)\n"
+                         f"• Avant la reprise (période calme depuis le {debut:%d/%m}) : {calme} arrivées")
+    else:
+        ligne_reprise = (f"• Pas encore de reprise détectée (aucun jour à {SEUIL_REPRISE}+ arrivées "
+                         f"depuis le {debut:%d/%m})")
+
+    # Jour par jour (depuis la reprise, ou les derniers jours)
+    dernier_jour = borne.date()
+    premier_jour = date.fromisoformat(reprise) if reprise else dernier_jour - timedelta(days=6)
+    premier_jour = max(premier_jour, dernier_jour - timedelta(days=NB_JOURS_DETAIL - 1), debut.date())
+    conf_jour = db.confirmations_par_jour(session)
+    jours = []
+    jour = premier_jour
+    while jour <= dernier_jour:
+        cle = jour.isoformat()
+        jours.append(f"  • {JOURS_SEMAINE[jour.weekday()][:3]} {jour:%d/%m} : "
+                     f"{arrivees_jour.get(cle, 0)} arrivées · {conf_jour.get(cle, 0)} confirmations")
+        jour += timedelta(days=1)
+
+    # Où bloquent ceux qui ont commencé sans finir
+    bloques = Counter()
+    for u in en_cours:
+        etape = prochaine_etape(u)
+        bloques["presence" if etape in ("soir", "confirmation") else etape] += 1
+    lignes_blocage = " · ".join(f"{libelle} {bloques[cle]}" for cle, libelle in ETAPES_FUNNEL if bloques[cle])
+
     soirs = "\n".join(
-        f"  • {JOURS[j]['nom']} : {len(db.ids_confirmes(webinaire(), j))} prévus · "
+        f"  • {JOURS[j]['semaine']} {JOURS[j]['nom']} : {len(db.ids_confirmes(session, j))} prévus · "
         f"{len(db.ids_presents(j, SEUILS[j]))} présents"
         for j in JOURS)
-    await update.message.reply_text(
-        "Statistiques Trading Pour Tous\n\n"
-        f"👥 Personnes connues : {len(tous)}\n"
-        f"✅ Confirmées : {len(confirmes)}\n"
-        f"⏳ Pas encore confirmées : {len(tous) - len(confirmes)}\n\n"
-        f"Liens d'entrée :\n{bloc(db.compter_liens())}\n\n"
-        f"Q3 Déjà tradé :\n{bloc(db.compter_reponses(webinaire(), 'deja_trade'))}\n\n"
-        f"Q4 Freins :\n{bloc(db.compter_reponses(webinaire(), 'frein'))}\n\n"
-        f"Q5 Présence :\n{bloc(db.compter_reponses(webinaire(), 'presence'))}\n\n"
-        f"Soirs :\n{soirs}")
+
+    texte = (
+        f"📊 Événement en cours : {_nom_session(session)}\n"
+        "━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"🚀 Campagne\n{ligne_reprise}\n\n"
+        f"👥 Personnes venues pour cet événement : {venus}\n"
+        f"  • nouvelles (jamais venues avant) : {len(nouveaux)}\n"
+        f"  • anciennes revenues : {len(revenus)}\n"
+        f"  • n'ont pas commencé l'inscription : {venus - len(confirmes) - len(en_cours)}\n"
+        f"  • ont commencé sans finir : {len(en_cours)}"
+        + (f"\n     bloquées à : {lignes_blocage}" if lignes_blocage else "") + "\n"
+        f"  • ✅ CONFIRMÉES : {len(confirmes)} ({_pourcentage(len(confirmes), venus)} des venues)\n\n"
+        f"📈 Jour par jour\n" + "\n".join(jours) + "\n\n"
+        f"📅 Soirs\n{soirs}\n\n"
+        f"🔗 Liens d'entrée (arrivées de cette campagne)\n{_bloc(db.liens_entree(d, b))}\n\n"
+        f"Q3 Déjà tradé :\n{_bloc(db.compter_reponses(session, 'deja_trade'))}\n\n"
+        f"Q4 Freins :\n{_bloc(db.compter_reponses(session, 'frein'))}\n\n"
+        f"Q5 Présence :\n{_bloc(db.compter_reponses(session, 'presence'))}")
+
+    if maintenant > fin_evt:
+        apres = len(db.premieres_venues(fin_evt.strftime(FORMAT), maintenant.strftime(FORMAT)))
+        texte += (f"\n\n🏁 Événement terminé. Depuis : {apres} nouvelle(s) arrivée(s). Elles compteront "
+                  "pour le prochain événement dès que tu l'auras programmé avec /dates.")
+    return texte + "\n\nTout l'historique : /stats global"
+
+
+def stats_globales() -> str:
+    session = webinaire()
+    par_session = db.compter_inscriptions_par_session()
+    lignes = "\n".join(
+        f"  • {_nom_session(s)}{' (en cours)' if s == session else ''} : {par_session.get(s, 0)} confirmés"
+        for s in db.lister_sessions())
+    return (
+        "🌍 Statistiques globales (tous les événements)\n"
+        "━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"👥 Personnes connues au total : {len(db.ids_tous())}\n"
+        f"✅ Ont confirmé au moins une fois : {db.compter_confirmes_distincts()}\n"
+        f"🗂 Inscrits de l'ancien bot (avant les événements) : {len(db.ids_septembre())}\n\n"
+        f"📅 Confirmés par événement :\n{lignes}\n\n"
+        f"🔗 Liens d'entrée (depuis le début) :\n{_bloc(db.compter_liens())}\n\n"
+        "Détail de l'événement en cours : /stats")
+
+
+@admin_seulement
+async def cmd_stats(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    globales = bool(ctx.args) and ctx.args[0].lower() == "global"
+    await update.message.reply_text(stats_globales() if globales else stats_evenement())
 
 
 @admin_seulement

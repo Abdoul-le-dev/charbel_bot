@@ -481,7 +481,7 @@ async def finaliser_inscription(bot, uid):
         noter(uid, await ecrire(bot, uid, f"<b>✅ Tout est prêt, {h(u.get('prenom') or '')}.</b>\n\n"
                                           "Je suis en train de valider ta place…"))
         await asyncio.sleep(random.uniform(DELAI_VALIDATION_MIN, DELAI_VALIDATION_MAX))
-        db.upsert_user(uid, completed=1, en_cours=0)
+        db.marquer_confirme(uid, webinaire())
         await nettoyer(bot, uid)                # efface tout le parcours : vidéo, stickers, questions, réponses, relances
         await envoyer_confirmation(bot, uid)
     except Exception as e:
