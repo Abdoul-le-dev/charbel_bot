@@ -8,7 +8,7 @@ Pour le lancement du bot (main) : voir main.py   →   python main.py
 import asyncio
 import io
 from collections import Counter
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 
 from telegram import Update
 from telegram.ext import Application, ContextTypes, ConversationHandler
@@ -17,63 +17,72 @@ from database import database as db
 
 from client import (
     A_COMPLETER, DATE_LANCEMENT_RELANCES, DUREE_LIVE, FORMAT, FREINS, HEURE_LIVE,
-    HEURE_RAPPORT, JOURS, PAUSE_ENVOI, SEUILS, TOLERANCE, VIDEO_RELANCE, WEBINAIRE,
-    admin_seulement, debut_live, envoyer_video, kb, kb_demarrer, lancer, normaliser,
-    prevenir_admins, prochaine_etape, restantes,
+    HEURE_RAPPORT, JOURS, JOURS_SEMAINE, PAUSE_ENVOI, SEUILS, TOLERANCE, VIDEO_RELANCE,
+    admin_seulement, appliquer_dates, debut_live, envoyer_video, kb, kb_canal, kb_demarrer, lancer,
+    nom_date, normaliser, prevenir_admins, prochaine_etape, restantes, webinaire,
 )
 from nettoyage import noter
 
 # ════════════════════════════════════════════════════════════════════════════
 # CIBLES (utilisées par /envoyer, /export et les rappels)
+# Les libellés montrent les vraies dates : ils ne sont vus que par l'admin.
 # ════════════════════════════════════════════════════════════════════════════
 
 def _incomplets():
-    confirmes = set(db.ids_confirmes(WEBINAIRE))
+    confirmes = set(db.ids_confirmes(webinaire()))
     return [i for i in db.ids_tous() if i not in confirmes]
 
 
 def _presents(jour):
     presents = set(db.ids_presents(jour, SEUILS[jour]))
-    return [i for i in db.ids_confirmes(WEBINAIRE, jour) if i in presents]
+    return [i for i in db.ids_confirmes(webinaire(), jour) if i in presents]
 
 
 def _absents(jour):
     presents = set(db.ids_presents(jour, SEUILS[jour]))
-    return [i for i in db.ids_confirmes(WEBINAIRE, jour) if i not in presents]
+    return [i for i in db.ids_confirmes(webinaire(), jour) if i not in presents]
 
 
 # clé -> (libellé, fonction qui retourne la liste des identifiants)
 CIBLES = {
     "tous":         ("Tous (canal + bot)",                    db.ids_tous),
-    "confirmes":    ("Confirmés",                             lambda: db.ids_confirmes(WEBINAIRE)),
+    "confirmes":    ("Confirmés",                             lambda: db.ids_confirmes(webinaire())),
     "incomplets":   ("Incomplets (pas confirmés)",            _incomplets),
     "sept":         ("Anciens inscrits de septembre",         db.ids_septembre),
-    "j1":           (f"Confirmés pour le {JOURS[1]['nom']}",  lambda: db.ids_confirmes(WEBINAIRE, 1)),
-    "j2":           (f"Confirmés pour le {JOURS[2]['nom']}",  lambda: db.ids_confirmes(WEBINAIRE, 2)),
-    "presents_1":   (f"Présents le {JOURS[1]['nom']}",        lambda: _presents(1)),
-    "absents_1":    (f"Absents le {JOURS[1]['nom']}",         lambda: _absents(1)),
-    "presents_2":   (f"Présents le {JOURS[2]['nom']}",        lambda: _presents(2)),
-    "absents_2":    (f"Absents le {JOURS[2]['nom']}",         lambda: _absents(2)),
-    "debutants":    ("Débutants (jamais tradé)",              lambda: db.ids_confirmes(WEBINAIRE, champ="deja_trade", valeur="Non")),
-    "traders":      ("Ont déjà tradé",                        lambda: db.ids_confirmes(WEBINAIRE, champ="deja_trade", valeur="Oui")),
-    "un_seul_soir": ("Un seul soir",                          lambda: db.ids_confirmes(WEBINAIRE, champ="presence", valeur="Un seul soir")),
+    "j1":           (lambda: f"Confirmés pour le {JOURS[1]['nom']}",  lambda: db.ids_confirmes(webinaire(), 1)),
+    "j2":           (lambda: f"Confirmés pour le {JOURS[2]['nom']}",  lambda: db.ids_confirmes(webinaire(), 2)),
+    "presents_1":   (lambda: f"Présents le {JOURS[1]['nom']}", lambda: _presents(1)),
+    "absents_1":    (lambda: f"Absents le {JOURS[1]['nom']}", lambda: _absents(1)),
+    "presents_2":   (lambda: f"Présents le {JOURS[2]['nom']}", lambda: _presents(2)),
+    "absents_2":    (lambda: f"Absents le {JOURS[2]['nom']}", lambda: _absents(2)),
+    "debutants":    ("Débutants (jamais tradé)",              lambda: db.ids_confirmes(webinaire(), champ="deja_trade", valeur="Non")),
+    "traders":      ("Ont déjà tradé",                        lambda: db.ids_confirmes(webinaire(), champ="deja_trade", valeur="Oui")),
+    "un_seul_soir": ("Un seul soir",                          lambda: db.ids_confirmes(webinaire(), champ="presence", valeur="Un seul soir")),
 }
+
+
+def libelle(cle) -> str:
+    texte = CIBLES[cle][0]
+    return texte() if callable(texte) else texte
+
+
 for _i, _frein in enumerate(FREINS):
     CIBLES[f"frein_{_i}"] = (f"Frein : {_frein}",
-                             lambda f=_frein: db.ids_confirmes(WEBINAIRE, champ="frein", valeur=f))
+                             lambda f=_frein: db.ids_confirmes(webinaire(), champ="frein", valeur=f))
 
 
 # ════════════════════════════════════════════════════════════════════════════
 # RAPPELS PLANIFIÉS (modifiables par l'admin) + RELANCES AUTOMATIQUES
+# Aucun lien du live n'est envoyé en privé : les rappels renvoient vers le canal Telegram.
 # ════════════════════════════════════════════════════════════════════════════
 
 # (moment, texte) — moment = heure fixe "12:00" ou décalage en minutes par rapport au début du live.
-# {prenom} est remplacé par le prénom. Le bouton « Rejoindre le live » est ajouté à chaque message.
+# {prenom} est remplacé par le prénom. Un bouton « Rejoindre le canal » est ajouté à chaque message.
 SEQUENCE_SOIR = [
-    ("12:00", f"{{prenom}}, ce soir à {HEURE_LIVE}h.\n\nTon lien est déjà là, juste en dessous."),
+    ("12:00", f"{{prenom}}, ce soir à {HEURE_LIVE}h.\n\nLe lien du live sera publié dans le canal Telegram."),
     (-180, "⏰ Dans 3 heures.\n\nCharge ton téléphone."),
-    (-30, "⏰ Dans 30 minutes.\n\nConnecte-toi maintenant."),
-    (5, "🔴 On a commencé.\n\nPlus d'une centaine de personnes sont déjà là."),
+    (-30, "⏰ Dans 30 minutes.\n\nLe lien est dans le canal Telegram. Connecte-toi maintenant."),
+    (5, "🔴 On a commencé.\n\nPlus d'une centaine de personnes sont déjà là. Le lien est dans le canal."),
 ]
 
 
@@ -81,16 +90,14 @@ def _apres_live(jour, minutes) -> str:
     return (debut_live(jour) + timedelta(minutes=minutes)).strftime(FORMAT)
 
 
-# (nom, cible, date d'envoi, texte, vidéo, bouton)  — bouton : "live_1" / "live_2" / "demarrer" / ""
-PLANNING = [
-    ("Réinvitation septembre", "sept", "2026-09-25 12:00:00",
-     "{prenom},\n\nla formation gratuite revient :\nmercredi 30 septembre et jeudi 1er octobre, à "
-     f"{HEURE_LIVE}h.\n\nTu avais réservé ta place en septembre. Elle t'attend toujours.\n\nConfirme-la ici.",
-     "", "demarrer"),
-    ("Veille J1 (vidéo)", "j1", "2026-09-29 20:00:00",
-     f"Demain soir, {HEURE_LIVE}h.\n\nVoilà ce que tu vas voir.", "29.mp4", "live_1"),
+def construire_planning():
+    """Liste des rappels pour les dates actuelles (recalculée après /dates).
+    (nom, cible, date d'envoi, texte, vidéo, bouton)  — bouton : "canal" / "demarrer" / """""
+    planning = [
+    ("Veille J1 (vidéo)", "j1", (debut_live(1) - timedelta(days=1)).strftime(FORMAT),
+     f"Demain soir, {HEURE_LIVE}h.\n\nVoilà ce que tu vas voir.", "29.mp4", "canal"),
     ("Fin J1 → demain", "confirmes", _apres_live(1, DUREE_LIVE * 60 + 15),
-     f"Demain, je montre [{A_COMPLETER}].\n\nMême heure, même lien.", "", "live_2"),
+     f"Demain, je montre [{A_COMPLETER}].\n\nMême heure. Le lien sera dans le canal Telegram.", "", "canal"),
     ("Absents J1 (replay)", "absents_1", _apres_live(1, DUREE_LIVE * 60 + 45),
      f"[{A_COMPLETER}] texte replay + relance", "", ""),
     ("Présents J1 (offre)", "presents_1", _apres_live(1, DUREE_LIVE * 60 + 45),
@@ -99,21 +106,36 @@ PLANNING = [
      f"[{A_COMPLETER}] texte replay + relance", "", ""),
     ("Présents J2 (offre)", "presents_2", _apres_live(2, DUREE_LIVE * 60 + 45),
      f"[{A_COMPLETER}] texte de l'offre", "", ""),
-]
-for _jour, _infos in JOURS.items():
-    for _moment, _texte in SEQUENCE_SOIR:
-        if isinstance(_moment, str):
-            _quand = datetime.strptime(f"{_infos['date']} {_moment}", "%Y-%m-%d %H:%M")
-        else:
-            _quand = debut_live(_jour) + timedelta(minutes=_moment)
-        PLANNING.append((f"J{_jour} {_quand:%H:%M}", f"j{_jour}", _quand.strftime(FORMAT),
-                         _texte, "", f"live_{_jour}"))
-PLANNING.sort(key=lambda r: r[2])
+    ]
+    for jour, infos in JOURS.items():
+        for moment, texte in SEQUENCE_SOIR:
+            if isinstance(moment, str):
+                quand = datetime.strptime(f"{infos['date']} {moment}", "%Y-%m-%d %H:%M")
+            else:
+                quand = debut_live(jour) + timedelta(minutes=moment)
+            planning.append((f"J{jour} {quand:%H:%M}", f"j{jour}", quand.strftime(FORMAT),
+                             texte, "", "canal"))
+    return sorted(planning, key=lambda r: r[2])
+
+
+PLANNING = construire_planning()        # gardé pour main.py
+
+
+def planifier_rappels() -> int:
+    """Ajoute en base les rappels des dates actuelles qui n'y sont pas encore (même nom + même date).
+    Retourne le nombre de rappels réellement ajoutés. Sans risque de doublon : appelable à chaque démarrage."""
+    existants = {(r["nom"], r["date_envoi"]) for r in db.get_rappels()}
+    nouveaux = [r for r in construire_planning() if (r[0], r[2]) not in existants]
+    if not nouveaux:
+        return 0
+    db.ajouter_rappels(nouveaux)
+    return len(nouveaux)
 
 
 def clavier_rappel(bouton):
-    if bouton.startswith("live_"):
-        return kb(("▶️ Rejoindre le live", f"live:{bouton[5:]}"))
+    # "live_1" / "live_2" : anciennes valeurs encore en base → renvoient aussi vers le canal
+    if bouton == "canal" or bouton.startswith("live_"):
+        return kb_canal()
     if bouton == "demarrer":
         return kb_demarrer()
     return None
@@ -169,7 +191,7 @@ async def relancer_incomplets(bot, maintenant):
     Chaque palier attend un vrai écart de temps depuis l'envoi réel du précédent (db.ETAPES_RELANCE) :
     ça évite que les 3 relances partent d'un coup lors d'un rattrapage après redémarrage/retard."""
     for colonne, minutes_attente, colonne_precedente in db.ETAPES_RELANCE:
-        cibles = db.users_a_relancer(WEBINAIRE, colonne, minutes_attente, colonne_precedente,
+        cibles = db.users_a_relancer(webinaire(), colonne, minutes_attente, colonne_precedente,
                                      DATE_LANCEMENT_RELANCES)
         for u in cibles:
             db.marquer_relance(u["telegram_id"], colonne)          # d'abord : jamais deux envois
@@ -312,6 +334,7 @@ async def cmd_aide(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "/codes 1 NASDAQ OR BTC — définir les 3 codes du soir 1 (ou 2)\n"
         "/envoyer — diffuser un message à une cible\n"
         "/export — exporter un tableau Excel (tu choisis la cible)\n"
+        "/dates — voir ou changer les dates du webinaire\n"
         "/stats — statistiques\n"
         "/nouvelle_categorie <nom>")
 
@@ -371,6 +394,71 @@ async def cmd_codes(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 # ════════════════════════════════════════════════════════════════════════════
+# COMMANDE ADMIN — /dates : changer les dates du webinaire sans toucher au code
+#   /dates                     → affiche les dates actuelles
+#   /dates 11/11/2026          → aperçu du changement (date du MERCREDI)
+#   /dates 11/11/2026 oui      → applique : nouvelle session, rappels replanifiés
+# ════════════════════════════════════════════════════════════════════════════
+
+def _resume_dates() -> str:
+    return "\n".join(f"• Soir {j} : {JOURS[j]['semaine']} {JOURS[j]['nom']} {JOURS[j]['date'][:4]}, {HEURE_LIVE}h"
+                     for j in JOURS)
+
+
+@admin_seulement
+async def cmd_dates(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not ctx.args:
+        await update.message.reply_text(
+            f"📅 Webinaire actuel :\n{_resume_dates()}\n\n"
+            f"Inscrits confirmés : {len(db.ids_confirmes(webinaire()))}\n\n"
+            "Pour changer : /dates JJ/MM/AAAA (la date du mercredi)\nEx : /dates 11/11/2026")
+        return
+
+    saisie = ctx.args[0]
+    mercredi = None
+    for fmt in ("%d/%m/%Y", "%Y-%m-%d", "%d-%m-%Y"):
+        try:
+            mercredi = datetime.strptime(saisie, fmt).date()
+            break
+        except ValueError:
+            pass
+    if not mercredi:
+        await update.message.reply_text("❌ Date illisible. Exemple : /dates 11/11/2026")
+        return
+    if mercredi.weekday() != 2:
+        await update.message.reply_text(f"❌ Le {nom_date(mercredi)} est un {JOURS_SEMAINE[mercredi.weekday()]}. "
+                                        "Indique la date du MERCREDI (le jeudi est ajouté tout seul).")
+        return
+    if mercredi < db.now_benin().date():
+        await update.message.reply_text("❌ Cette date est déjà passée.")
+        return
+    if mercredi.isoformat() == webinaire():
+        await update.message.reply_text(f"ℹ️ Ce sont déjà les dates actuelles :\n{_resume_dates()}")
+        return
+
+    jeudi = mercredi + timedelta(days=1)
+    if ctx.args[1:] != ["oui"]:
+        await update.message.reply_text(
+            f"⚠️ Nouveau webinaire : mercredi {nom_date(mercredi)} et jeudi {nom_date(jeudi)} "
+            f"{mercredi.year}, {HEURE_LIVE}h.\n\n"
+            "Ce que ça fait :\n"
+            "• c'est une NOUVELLE session : les inscrits actuels devront reconfirmer leur place "
+            "(prénom, WhatsApp et réponses Q3/Q4 sont gardés)\n"
+            "• les rappels des deux nouveaux soirs sont planifiés\n"
+            "• les stats et cibles « présents / absents » portent sur les nouveaux soirs\n\n"
+            f"Pour valider : /dates {saisie} oui")
+        return
+
+    appliquer_dates(mercredi, sauver=True)
+    ajoutes = planifier_rappels()
+    await update.message.reply_text(
+        f"✅ Dates mises à jour :\n{_resume_dates()}\n\n"
+        f"📌 {ajoutes} rappels planifiés pour ces soirs. Vérifie-les avec /rappels."
+        "\n\n"
+        "N'oublie pas les codes des soirs : /codes 1 ... et /codes 2 ...")
+
+
+# ════════════════════════════════════════════════════════════════════════════
 # COMMANDES ADMIN — /envoyer et /export (même choix de cible)
 # ════════════════════════════════════════════════════════════════════════════
 
@@ -380,8 +468,8 @@ CHOIX_CIBLE, RECEVOIR_MESSAGE = range(2)
 async def afficher_cibles(update, ctx, action, titre):
     ctx.user_data["action"] = action
     lignes = [titre, ""]
-    for numero, (libelle, get_ids) in enumerate(CIBLES.values(), start=1):
-        lignes.append(f"{numero} — {libelle} ({len(get_ids())})")
+    for numero, (cle, (_, get_ids)) in enumerate(CIBLES.items(), start=1):
+        lignes.append(f"{numero} — {libelle(cle)} ({len(get_ids())})")
     lignes.append("\nRéponds avec le numéro (ou /cancel).")
     await update.message.reply_text("\n".join(lignes))
     return CHOIX_CIBLE
@@ -409,7 +497,7 @@ async def choisir_cible(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if ctx.user_data["action"] == "export":
         await exporter(update, cle)
         return ConversationHandler.END
-    await update.message.reply_text(f"✅ Cible : {CIBLES[cle][0]}\n\nEnvoie maintenant ton message "
+    await update.message.reply_text(f"✅ Cible : {libelle(cle)}\n\nEnvoie maintenant ton message "
                                     "(texte, photo ou vidéo avec légende).")
     return RECEVOIR_MESSAGE
 
@@ -428,8 +516,7 @@ async def annuler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def diffuser(bot, admin_chat, message_id, cle):
     """Copie le message de l'admin (quel que soit son format) à chaque personne de la cible."""
-    libelle, get_ids = CIBLES[cle]
-    ids = get_ids()
+    nom_cible, ids = libelle(cle), CIBLES[cle][1]()
     ok = 0
     for uid in ids:
         try:
@@ -438,7 +525,7 @@ async def diffuser(bot, admin_chat, message_id, cle):
         except Exception as e:
             print(f"Diffusion uid={uid} : {e}")
         await asyncio.sleep(PAUSE_ENVOI)
-    await bot.send_message(chat_id=admin_chat, text=f"Diffusion terminée — {ok}/{len(ids)} envoyés à « {libelle} ».")
+    await bot.send_message(chat_id=admin_chat, text=f"Diffusion terminée — {ok}/{len(ids)} envoyés à « {nom_cible} ».")
 
 
 def construire_excel(lignes) -> bytes:
@@ -477,16 +564,15 @@ def construire_excel(lignes) -> bytes:
 
 
 async def exporter(update, cle):
-    libelle, get_ids = CIBLES[cle]
-    ids = get_ids()
+    nom_cible, ids = libelle(cle), CIBLES[cle][1]()
     if not ids:
-        await update.message.reply_text(f"❌ Personne dans « {libelle} ».")
+        await update.message.reply_text(f"❌ Personne dans « {nom_cible} ».")
         return
     lignes = db.lignes_export(ids, SEUILS)
     date = db.now_benin().strftime("%d%m_%Hh%M")
     await update.message.reply_document(
         document=construire_excel(lignes), filename=f"export_{cle}_{date}.xlsx",
-        caption=f"Export « {libelle} » : {len(lignes)} personnes.\n"
+        caption=f"Export « {nom_cible} » : {len(lignes)} personnes.\n"
                 "Onglet « Synthèse » : réponses Q3 / Q4 / Q5 comptées.")
 
 
@@ -499,10 +585,10 @@ async def cmd_stats(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     def bloc(dictionnaire):
         return "\n".join(f"  • {k} : {v}" for k, v in dictionnaire.items()) or "  (aucun)"
 
-    tous, confirmes = db.ids_tous(), db.ids_confirmes(WEBINAIRE)
+    tous, confirmes = db.ids_tous(), db.ids_confirmes(webinaire())
     soirs = "\n".join(
-        f"  • {JOURS[j]['nom']} : {len(db.ids_confirmes(WEBINAIRE, j))} prévus · "
-        f"{db.nb_clics('live', j)} ont cliqué · {len(db.ids_presents(j, SEUILS[j]))} présents"
+        f"  • {JOURS[j]['nom']} : {len(db.ids_confirmes(webinaire(), j))} prévus · "
+        f"{len(db.ids_presents(j, SEUILS[j]))} présents"
         for j in JOURS)
     await update.message.reply_text(
         "Statistiques Trading Pour Tous\n\n"
@@ -510,11 +596,10 @@ async def cmd_stats(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         f"✅ Confirmées : {len(confirmes)}\n"
         f"⏳ Pas encore confirmées : {len(tous) - len(confirmes)}\n\n"
         f"Liens d'entrée :\n{bloc(db.compter_liens())}\n\n"
-        f"Q3 Déjà tradé :\n{bloc(db.compter_reponses(WEBINAIRE, 'deja_trade'))}\n\n"
-        f"Q4 Freins :\n{bloc(db.compter_reponses(WEBINAIRE, 'frein'))}\n\n"
-        f"Q5 Présence :\n{bloc(db.compter_reponses(WEBINAIRE, 'presence'))}\n\n"
-        f"Soirs :\n{soirs}\n\n"
-        f"📅 Ont cliqué sur le calendrier : {db.nb_clics('agenda_android') + db.nb_clics('agenda_iphone')}")
+        f"Q3 Déjà tradé :\n{bloc(db.compter_reponses(webinaire(), 'deja_trade'))}\n\n"
+        f"Q4 Freins :\n{bloc(db.compter_reponses(webinaire(), 'frein'))}\n\n"
+        f"Q5 Présence :\n{bloc(db.compter_reponses(webinaire(), 'presence'))}\n\n"
+        f"Soirs :\n{soirs}")
 
 
 @admin_seulement

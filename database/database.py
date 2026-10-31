@@ -132,8 +132,8 @@ COLONNES_USERS = {
     "deja_trade": "TEXT",       # Q3
     "frein": "TEXT",            # Q4
     "presence": "TEXT",         # Q5 : "Les deux soirs" / "Un seul soir"
-    "veut_j1": "INTEGER",       # présent prévu le 30 septembre (1/0)
-    "veut_j2": "INTEGER",       # présent prévu le 1er octobre  (1/0)
+    "veut_j1": "INTEGER",       # présent prévu au soir 1 (mercredi) (1/0)
+    "veut_j2": "INTEGER",       # présent prévu au soir 2 (jeudi)    (1/0)
     "webinaire": "TEXT",        # webinaire pour lequel la personne est inscrite
     "en_cours": "INTEGER DEFAULT 0",   # 1 = est en train de remplir le questionnaire
     "relance5_le": "TEXT",      # date/heure d'envoi de la relance à 5 min (NULL = pas encore envoyée)
@@ -317,12 +317,16 @@ def nb_clics(type_, jour=None) -> int:
 
 
 def ids_presents(jour, depuis: str) -> list[int]:
-    """Présent = a envoyé un code ce soir-là OU a cliqué sur le live à partir de `depuis`."""
+    """Présent = a envoyé un code ce soir-là OU a cliqué sur le live à partir de `depuis` (début du live).
+    Seuls les événements du jour même comptent : les codes d'une session précédente (même n° de soir)
+    ne rendent pas présent à la session actuelle."""
+    debut_jour, fin_jour = _plage(depuis[:10], depuis[:10])
     with connexion() as conn:
         rows = conn.execute(
             """SELECT DISTINCT telegram_id FROM suivi
-               WHERE jour = ? AND (type = 'code' OR (type = 'live' AND created_at >= ?))""",
-            (jour, depuis)).fetchall()
+               WHERE jour = ? AND created_at < ?
+                 AND ((type = 'code' AND created_at >= ?) OR (type = 'live' AND created_at >= ?))""",
+            (jour, fin_jour, debut_jour, depuis)).fetchall()
     return [r[0] for r in rows]
 
 
@@ -402,6 +406,15 @@ def seed_rappels(planning):
     with connexion() as conn:
         if conn.execute("SELECT 1 FROM rappels").fetchone():
             return
+        conn.executemany(
+            "INSERT INTO rappels (nom, cible, date_envoi, texte, video, bouton) VALUES (?, ?, ?, ?, ?, ?)",
+            planning)
+
+
+def ajouter_rappels(planning):
+    """Ajoute des rappels même si la table en contient déjà (utilisé par /dates via planifier_rappels,
+    qui filtre lui-même ceux qui existent déjà : aucun doublon)."""
+    with connexion() as conn:
         conn.executemany(
             "INSERT INTO rappels (nom, cible, date_envoi, texte, video, bouton) VALUES (?, ?, ?, ?, ?, ?)",
             planning)
@@ -536,9 +549,6 @@ def lignes_export(ids, seuils: dict) -> list[dict]:
     for uid in ids:
         u, m, evts = users.get(uid, {}), membres.get(uid, {}), evenements.get(uid, [])
 
-        def premier(type_, jour=None):
-            return next((e for e in evts if e["type"] == type_ and (jour is None or e["jour"] == jour)), None)
-
         ligne = {
             "ID Telegram": uid,
             "Prénom": u.get("prenom") or "",
@@ -549,20 +559,25 @@ def lignes_export(ids, seuils: dict) -> list[dict]:
             "Q3 Déjà tradé": u.get("deja_trade") or "",
             "Q4 Frein": u.get("frein") or "",
             "Q5 Présence": u.get("presence") or "",
-            "Prévu 30 sept": "" if u.get("veut_j1") is None else oui_non(u["veut_j1"]),
-            "Prévu 1er oct": "" if u.get("veut_j2") is None else oui_non(u["veut_j2"]),
-            "Clic calendrier": oui_non(any(e["type"].startswith("agenda") for e in evts)),
+            "Prévu soir 1": "" if u.get("veut_j1") is None else oui_non(u["veut_j1"]),
+            "Prévu soir 2": "" if u.get("veut_j2") is None else oui_non(u["veut_j2"]),
         }
         for jour, seuil in seuils.items():
-            clic = premier("live", jour)
+            debut_jour, fin_jour = _plage(seuil[:10], seuil[:10])
+            evts_jour = [e for e in evts if debut_jour <= e["created_at"] < fin_jour]   # ce soir-là uniquement
+
+            def premier(type_, jour=jour):
+                return next((e for e in evts_jour if e["type"] == type_ and e["jour"] == jour), None)
+
+            clic = premier("live")
             ligne[f"Clic live J{jour}"] = oui_non(clic)
             ligne[f"Heure 1er clic J{jour}"] = clic["created_at"][11:] if clic else ""
             for rang in (1, 2, 3):
-                code = next((e for e in evts if e["type"] == "code" and e["jour"] == jour
+                code = next((e for e in evts_jour if e["type"] == "code" and e["jour"] == jour
                              and e["detail"] == str(rang)), None)
                 ligne[f"J{jour} code {rang}"] = code["created_at"][11:] if code else ""
-            a_code = any(e["type"] == "code" and e["jour"] == jour for e in evts)
-            clic_tard = any(e["type"] == "live" and e["jour"] == jour and e["created_at"] >= seuil for e in evts)
+            a_code = any(e["type"] == "code" and e["jour"] == jour for e in evts_jour)
+            clic_tard = any(e["type"] == "live" and e["jour"] == jour and e["created_at"] >= seuil for e in evts_jour)
             ligne[f"Présent J{jour}"] = oui_non(a_code or clic_tard)
         lignes.append(ligne)
     return lignes

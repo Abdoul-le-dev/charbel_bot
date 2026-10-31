@@ -1,7 +1,11 @@
 """
 Bot Trading Pour Tous — CÔTÉ CLIENT.
 Tout ce que vit l'utilisateur : arrivée dans le canal, questionnaire, confirmation de place,
-calendrier, boutons, messages libres et codes du soir.
+boutons, messages libres et codes du soir.
+
+Aucune date fixe n'est montrée à l'utilisateur : on parle toujours de « mercredi prochain » et
+« jeudi prochain », pour pouvoir réutiliser le même lien à chaque campagne.
+Les liens du live ne sont JAMAIS envoyés en privé : ils sont publiés le jour même dans le canal Telegram.
 
 Pour les commandes admin et les rappels planifiés : voir admin.py
 Pour le lancement du bot : voir main.py  (python main.py)
@@ -10,12 +14,12 @@ Pour le nettoyage du chat à la fin de l'inscription : voir nettoyage.py
 import asyncio
 import functools
 import html
+import json
 import os
 import random
 import re
 import unicodedata
-from datetime import datetime, timedelta
-from urllib.parse import urlencode
+from datetime import date, datetime, timedelta
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes, ConversationHandler
@@ -31,18 +35,22 @@ TOKEN = os.getenv("TOKEN")          # ne JAMAIS écrire le token dans le code (m
 ADMIN_IDS = {6992809421, 6799962131}
 ADMIN_USERNAME = "@Faiseur2Rois"
 
-WEBINAIRE = "2026-09-30"                # identifiant du webinaire : sert à savoir qui est déjà inscrit
-HEURE_LIVE = 20                         # heure du Bénin — ⚠️ ton texte de félicitations parlait de 21h, à vérifier
-DUREE_LIVE = 2                          # heures (uniquement pour le calendrier)
+CANAL_TELEGRAM = "https://t.me/+Gib-RJjjQqgyMWNk"   # le lien du live est publié ici, le jour même
+
+# ── DATES DU WEBINAIRE (usage interne uniquement, jamais affichées aux utilisateurs) ──
+# Elles se changent avec la commande admin /dates, sans toucher au code ni redémarrer.
+# Elles sont enregistrées dans FICHIER_DATES ; les valeurs ci-dessous ne servent que si ce fichier n'existe pas.
+# Elles servent à savoir qui est inscrit à CETTE session, aux rappels planifiés et aux stats (admin.py).
+HEURE_LIVE = 21                         # heure du Bénin
+DUREE_LIVE = 2                          # heures
+FICHIER_DATES = "dates_webinaire.json"
 JOURS = {
-    1: {"date": "2026-09-30", "nom": "30 septembre", "semaine": "mercredi",
-        "live": "https://youtube.com/live/jEC7hAcVlTQ?feature=share"},
-    2: {"date": "2026-10-01", "nom": "1er octobre", "semaine": "jeudi",
-        "live": "https://youtube.com/live/TNjFGH64FHQ?feature=share"},
+    1: {"date": "2026-11-04", "nom": "4 novembre", "semaine": "mercredi", "relatif": "mercredi prochain"},
+    2: {"date": "2026-11-05", "nom": "5 novembre", "semaine": "jeudi", "relatif": "jeudi prochain"},
 }
 
 VIDEO_BIENVENUE = "video/welcomes.MP4"
-VIDEO_RELANCE = "video/welcomes.MP4"                    # à la racine (utilisé par admin.py)
+VIDEO_RELANCE = "video/welcomes.MP4"                    # utilisé par admin.py
 # VIDEO_BULLE = "bulle.mp4"                       # vidéo ronde (voir demarrer_questionnaire)
 
 # Stickers envoyés à des moments clés. Choisis peu d'endroits mais cohérents.
@@ -52,7 +60,7 @@ STICKERS = {
     "bienvenue": "",            # à l'arrivée dans le canal, juste après la vidéo d'accueil
     "debut_questionnaire": "",  # sticker « en cours » (sablier, chargement...) sous « Confirmation en cours »
     "presence": "",             # juste avant la question 5 : un sticker qui illustre le direct (caméra, ON AIR...)
-    "confirmation": "",         # juste après « Félicitations, ta place est confirmée »
+    "confirmation": "",         # juste après le message « Bravo, ton inscription est confirmée »
 }
 
 FREINS = ["Le manque de temps", "La peur de perdre de l'argent",
@@ -76,7 +84,49 @@ def debut_live(jour) -> datetime:
     return datetime.strptime(JOURS[jour]["date"], "%Y-%m-%d") + timedelta(hours=HEURE_LIVE)
 
 
-SEUILS = {j: debut_live(j).strftime(FORMAT) for j in JOURS}    # clic à partir de là = présent (admin.py)
+SEUILS = {}             # jour -> début du live : un clic/code à partir de là = présent (admin.py)
+
+MOIS = ["janvier", "février", "mars", "avril", "mai", "juin", "juillet",
+        "août", "septembre", "octobre", "novembre", "décembre"]
+JOURS_SEMAINE = ["lundi", "mardi", "mercredi", "jeudi", "vendredi", "samedi", "dimanche"]
+
+
+def nom_date(d: date) -> str:
+    """date(2026, 11, 4) -> '4 novembre' ; le 1er du mois -> '1er octobre'."""
+    return f"{'1er' if d.day == 1 else d.day} {MOIS[d.month - 1]}"
+
+
+def appliquer_dates(mercredi: date, sauver=False):
+    """Met à jour les deux soirs (mercredi + jeudi) partout dans le bot, en mémoire.
+    JOURS et SEUILS sont modifiés sur place : admin.py voit le changement immédiatement."""
+    for j, d in ((1, mercredi), (2, mercredi + timedelta(days=1))):
+        JOURS[j]["date"] = d.isoformat()
+        JOURS[j]["nom"] = nom_date(d)
+    SEUILS.clear()
+    SEUILS.update({j: debut_live(j).strftime(FORMAT) for j in JOURS})
+    if sauver:
+        with open(FICHIER_DATES, "w", encoding="utf-8") as f:
+            json.dump({"mercredi": mercredi.isoformat()}, f)
+
+
+def charger_dates():
+    mercredi = date.fromisoformat(JOURS[1]["date"])
+    try:
+        with open(FICHIER_DATES, encoding="utf-8") as f:
+            mercredi = date.fromisoformat(json.load(f)["mercredi"])
+    except FileNotFoundError:
+        pass
+    except Exception as e:
+        print(f"{FICHIER_DATES} illisible ({e}) : dates par défaut utilisées")
+    appliquer_dates(mercredi)
+
+
+def webinaire() -> str:
+    """Identifiant de la session en cours (= date du mercredi) : sert à savoir qui est déjà inscrit."""
+    return JOURS[1]["date"]
+
+
+charger_dates()
 
 
 def jour_courant():
@@ -85,7 +135,8 @@ def jour_courant():
 
 
 def dates_texte(jours) -> str:
-    return "le " + " et le ".join(JOURS[j]["nom"] for j in jours)
+    """Toujours sans date fixe : « mercredi prochain et jeudi prochain »."""
+    return " et ".join(JOURS[j]["relatif"] for j in jours)
 
 
 def jours_choisis(u) -> list[int]:
@@ -119,6 +170,11 @@ def kb(*boutons):
 
 def kb_demarrer(texte="✅ Je confirme ma place"):
     return kb((texte, "demarrer"))
+
+
+def kb_canal(texte="📢 Rejoindre le canal Telegram"):
+    """Bouton-lien vers le canal (là où le lien du live est publié)."""
+    return InlineKeyboardMarkup([[InlineKeyboardButton(texte, url=CANAL_TELEGRAM)]])
 
 
 async def ecrire(bot, uid, texte, markup=None):
@@ -263,63 +319,45 @@ def _valider_whatsapp(texte: str) -> str | None:
 
 
 # ════════════════════════════════════════════════════════════════════════════
-# CONFIRMATION : « je valide ta place » → (5 s) → chat nettoyé → félicitations + liens des 2 soirs + calendrier
+# CONFIRMATION : « je valide ta place » → (2-4 s) → chat nettoyé → message de confirmation
+# Plus de dates fixes, plus de liens du live, plus de bouton calendrier.
 # ════════════════════════════════════════════════════════════════════════════
 
-def _utc(jour):
-    """Début et fin du live en UTC (Bénin = UTC+1)."""
-    debut = debut_live(jour) - timedelta(hours=1)
-    return debut, debut + timedelta(hours=DUREE_LIVE)
-
-
-def lien_google_agenda(jour) -> str:
-    """Lien qui ouvre directement Google Agenda avec l'événement pré-rempli (Android et iPhone)."""
-    debut, fin = _utc(jour)
-    return "https://calendar.google.com/calendar/render?" + urlencode({
-        "action": "TEMPLATE",
-        "text": "Formation gratuite Trading Pour Tous",
-        "dates": f"{debut:%Y%m%dT%H%M%SZ}/{fin:%Y%m%dT%H%M%SZ}",
-        "details": f"Formation en direct (heure du Bénin).\n\nLien du direct : {JOURS[jour]['live']}",
-        "location": "En direct en ligne",
-    }, safe="/")
-
-
 async def envoyer_confirmation(bot, uid):
-    """Félicitations avec les liens des DEUX soirs (quel que soit le choix) et un seul bouton calendrier
-    (premier soir de la personne) qui ouvre directement le lien."""
     u = db.get_user(uid)
-    jour_agenda = jours_choisis(u)[0]
-
-    liens = "\n\n".join(
-        f"👉 Jour {j} — {JOURS[j]['semaine']} {JOURS[j]['nom']} :\n{JOURS[j]['live']}" for j in JOURS)
-    bouton_agenda = InlineKeyboardMarkup(
-        [[InlineKeyboardButton("📅 Ajouter à mon calendrier", url=lien_google_agenda(jour_agenda))]])
-
     await ecrire(
         bot, uid,
-        f"<b>🎉 Félicitations {h(u['prenom'])}, ta place vient d'être confirmée ✅</b>\n\n"
-        "Voici les liens qui te redirigent directement vers la formation 100 % gratuite. "
-        f"Clique sur le lien du jour concerné, à {HEURE_LIVE}h00 précises, heure du Bénin.\n\n"
-        f"{liens}\n\n"
-        "📌 <i>NB : copie et garde précieusement ces deux liens dans ton bloc-notes. "
-        "Je te les renverrai en rappel, mais c'est à toi de ne pas les perdre.</i>\n\n"
-        f"Rendez-vous {dates_texte(list(JOURS))}, {HEURE_LIVE}h00. Sois à l'heure.\n\n"
-        "— Coach Charbel",
-        bouton_agenda)
+        f"<b>☑ Bravo {h(u.get('prenom') or '')}, ton inscription est confirmée !</b>\n\n"
+        "Tu fais partie de la prochaine formation gratuite Trading Pour Tous.\n\n"
+        f"📅 Mercredi prochain et jeudi prochain, à {HEURE_LIVE} h (heure du Bénin), "
+        f"pendant environ {DUREE_LIVE} heures chaque soir.\n\n"
+        "🔔 Mets-toi un rappel sur ton téléphone dès maintenant pour ne pas oublier.\n\n"
+        "Reste attentif. Ce que je vais partager avec toi pendant ces deux soirées peut changer ta vie, "
+        "et celle des gens autour de toi.\n\n"
+        "— Charbel YAYI\n\n"
+        "━━━━━━━━━━━━━━━\n\n"
+        "<b>⚠️ DERNIÈRE ÉTAPE, TRÈS IMPORTANTE</b>\n\n"
+        "Toutes les informations, et le lien pour rejoindre le live, seront envoyées uniquement "
+        "dans le canal Telegram.\n\n"
+        "👉 Clique maintenant sur ce lien et rejoins le canal Telegram :\n\n"
+        f"{CANAL_TELEGRAM}\n\n"
+        "Si tu ne rejoins pas le canal, tu ne recevras pas le lien de la formation.")
     await envoyer_sticker(bot, uid, "confirmation")
 
 
 async def envoyer_lien_live(bot, uid, jour):
-    """Clic sur « Rejoindre le live » (boutons des rappels) : on note le clic (jour + heure), puis on envoie le vrai lien."""
+    """Clic sur un ANCIEN bouton « Rejoindre le live » (déjà présent dans certains chats) :
+    on note le clic, puis on renvoie vers le canal — plus aucun lien du live en privé."""
     db.enregistrer_suivi(uid, "live", jour)
-    bouton = InlineKeyboardMarkup([[InlineKeyboardButton("▶️ Ouvrir le live", url=JOURS[jour]["live"])]])
-    await ecrire(bot, uid, f"<b>🔴 Ton lien pour le direct du {JOURS[jour]['nom']}</b>", bouton)
+    await ecrire(bot, uid,
+                 "<b>🔴 Le lien du live est publié dans le canal Telegram, le jour même.</b>\n\n"
+                 "Rejoins le canal pour ne pas le manquer 👇", kb_canal())
 
 
 # ════════════════════════════════════════════════════════════════════════════
 # QUESTIONNAIRE — piloté par la base : on repart toujours de la 1re question sans réponse
 # Rien n'est supprimé pendant le questionnaire (pour ne pas distraire) : tout ce qui est affiché est mémorisé
-# (noter / noter_id) et effacé d'un coup à la fin, juste avant les félicitations.
+# (noter / noter_id) et effacé d'un coup à la fin, juste avant la confirmation.
 # ════════════════════════════════════════════════════════════════════════════
 
 PRENOMS_A_CONFIRMER = {}        # uid -> prénom proposé, en attente Oui/Non
@@ -347,7 +385,7 @@ def restantes(u) -> int:
 
 
 def inscrit(u) -> bool:
-    return bool(u and u.get("completed") == 1 and u.get("webinaire") == WEBINAIRE)
+    return bool(u and u.get("completed") == 1 and u.get("webinaire") == webinaire())
 
 
 def _titre(u, etape, emoji) -> str:
@@ -361,8 +399,10 @@ async def message_deja_inscrit(bot, uid):
     u = db.get_user(uid)
     await ecrire(bot, uid,
                  "<b>✅ Tu es déjà inscrit(e)</b>\n\n"
-                 f"Rendez-vous {dates_texte(jours_choisis(u))} à {HEURE_LIVE}h00 (heure du Bénin).\n\n"
-                 "Ton lien du direct et les rappels arrivent ici, en privé.")
+                 f"Rendez-vous {dates_texte(jours_choisis(u))} à {HEURE_LIVE} h (heure du Bénin).\n\n"
+                 "Le lien du live sera publié uniquement dans le canal Telegram, le jour même. "
+                 "Si ce n'est pas encore fait, rejoins-le maintenant :\n\n"
+                 f"{CANAL_TELEGRAM}")
 
 
 async def demarrer_questionnaire(bot, uid):
@@ -373,10 +413,10 @@ async def demarrer_questionnaire(bot, uid):
         await message_deja_inscrit(bot, uid)
         return
 
-    if not u or u.get("webinaire") != WEBINAIRE:
+    if not u or u.get("webinaire") != webinaire():
         # Nouveau webinaire : on garde prénom / WhatsApp / Q3 / Q4 déjà connus,
-        # mais la présence est à redonner (les anciennes réponses concernaient septembre).
-        db.upsert_user(uid, webinaire=WEBINAIRE, presence=None, veut_j1=None, veut_j2=None,
+        # mais la présence est à redonner (les anciennes réponses concernaient la session précédente).
+        db.upsert_user(uid, webinaire=webinaire(), presence=None, veut_j1=None, veut_j2=None,
                        completed=0, relance5_le=None, relance15_le=None, relance30_le=None)
     db.upsert_user(uid, en_cours=1)
 
@@ -400,7 +440,7 @@ async def poser_question(bot, uid):
     if etape == "confirmation":
         if uid not in FINALISATION:
             FINALISATION.add(uid)
-            lancer(finaliser_inscription(bot, uid))      # en tâche de fond : l'attente de 5 s ne bloque personne
+            lancer(finaliser_inscription(bot, uid))      # en tâche de fond : l'attente ne bloque personne
         return
 
     if etape == "prenom":
@@ -423,19 +463,19 @@ async def poser_question(bot, uid):
             bot, uid,
             "<b>🎯 Dernière question !</b>\n\n"
             f"{h(u.get('prenom') or '')}, ta présence est importante.\n\n"
-            "Seras-tu là les deux soirs ? ⚠️\n\n"
+            "Seras-tu là mercredi prochain et jeudi prochain ? ⚠️\n\n"
             "Ça se passera en direct, il n'y aura pas de replay !",
             kb((f"🔥 Oui, je serai là les DEUX soirs à {HEURE_LIVE}h", "q:presence:deux"),
                ("Je pourrai être là un seul soir", "q:presence:un")))
     else:   # "soir"
         msg = await ecrire(bot, uid, "<b>📅 Lequel des deux soirs ?</b>",
-                           kb(*[(JOURS[j]["nom"], f"q:soir:{j}") for j in JOURS]))
+                           kb(*[(JOURS[j]["relatif"].capitalize(), f"q:soir:{j}") for j in JOURS]))
 
     noter(uid, msg)
 
 
 async def finaliser_inscription(bot, uid):
-    """« Tout est prêt » → 5 s → inscription enregistrée → chat nettoyé → félicitations."""
+    """« Tout est prêt » → 2-4 s → inscription enregistrée → chat nettoyé → confirmation."""
     try:
         u = db.get_user(uid)
         noter(uid, await ecrire(bot, uid, f"<b>✅ Tout est prêt, {h(u.get('prenom') or '')}.</b>\n\n"
@@ -549,7 +589,8 @@ async def envoyer_bienvenue(bot, uid, lien_entree=None):
     legende = (
         "<b>Bienvenue dans Trading Pour Tous</b>\n\n"
         "Tu es sur le point de réserver ta place à la formation gratuite.\n\n"
-        f"<b>📅 Dates</b>\n{JOURS[1]['nom']} et {JOURS[2]['nom']}, à {HEURE_LIVE}h00 (heure du Bénin)\n\n"
+        "<b>📅 Dates</b>\n"
+        f"La formation gratuite aura lieu mercredi prochain et jeudi prochain, à {HEURE_LIVE} h (heure du Bénin).\n\n"
         "<b>🔴 Format</b>\nEn direct uniquement.")
     noter(uid, await envoyer_video(bot, uid, VIDEO_BIENVENUE, legende, nom="welcomes_222", parse_mode="HTML"))
     noter(uid, await envoyer_sticker(bot, uid, "bienvenue"))
@@ -647,8 +688,8 @@ async def message_libre(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if "present" in texte or "présent" in texte:
         u = db.get_user(uid)
         reponse = ("🙌 Je suis très content de savoir que tu seras là !\n\n"
-                   f"N'oublie pas : {dates_texte(jours_choisis(u))} à {HEURE_LIVE}h, heure de Cotonou.\n\n"
-                   "Je t'enverrai ton lien ici, en privé, juste avant le live.")
+                   f"N'oublie pas : {dates_texte(jours_choisis(u))} à {HEURE_LIVE} h, heure de Cotonou.\n\n"
+                   f"Le lien du live sera publié dans le canal Telegram, le jour même : {CANAL_TELEGRAM}")
     elif "merci" in texte:
         reponse = "jtp !"
     elif "ok" in texte:

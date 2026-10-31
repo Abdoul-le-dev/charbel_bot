@@ -1,4 +1,3 @@
-
 from dotenv import load_dotenv
 
 load_dotenv()      # DOIT rester avant l'import de client (qui lit TOKEN dès son chargement)
@@ -16,10 +15,10 @@ from client import (
     TOKEN, approuver_demande, boutons, cmd_inscription, cmd_start, message_libre,
 )
 from admin import (
-    CHOIX_CIBLE, PLANNING, RECEVOIR_MESSAGE,
-    annuler, choisir_cible, cmd_aide, cmd_categorie, cmd_codes, cmd_envoyer,
+    CHOIX_CIBLE, RECEVOIR_MESSAGE,
+    annuler, choisir_cible, cmd_aide, cmd_categorie, cmd_codes, cmd_dates, cmd_envoyer,
     cmd_envoyer_rappel, cmd_export, cmd_modifier, cmd_rappels, cmd_stats,
-    cmd_tester_rappel, demarrer_planificateur, error_handler, recevoir_message,
+    cmd_tester_rappel, demarrer_planificateur, error_handler, planifier_rappels, recevoir_message,
 )
 
 
@@ -29,7 +28,7 @@ def main():
                          "(token régénéré via @BotFather).")
 
     db.init_db()
-    db.seed_rappels(PLANNING)
+    planifier_rappels()          # ajoute les rappels des dates actuelles qui manquent (jamais de doublon)
     init_sondage_db()
 
     app = (Application.builder().token(TOKEN).read_timeout(30).write_timeout(30)
@@ -44,7 +43,7 @@ def main():
     for nom, fonction in [("aide", cmd_aide), ("stats", cmd_stats), ("rappels", cmd_rappels),
                           ("modifier", cmd_modifier), ("tester_rappel", cmd_tester_rappel),
                           ("envoyer_rappel", cmd_envoyer_rappel), ("codes", cmd_codes),
-                          ("nouvelle_categorie", cmd_categorie)]:
+                          ("dates", cmd_dates), ("nouvelle_categorie", cmd_categorie)]:
         app.add_handler(CommandHandler(nom, fonction))
 
     app.add_handler(ConversationHandler(
@@ -58,7 +57,7 @@ def main():
     ))
 
     # ── Boutons, erreurs, sondage
-    app.add_handler(CallbackQueryHandler(boutons, pattern=r"^(q|prenom|live|agenda|demarrer|souci)(:|$)"))
+    app.add_handler(CallbackQueryHandler(boutons, pattern=r"^(q|prenom|live|demarrer|souci)(:|$)"))
     app.add_error_handler(error_handler)
 
     register_sondage_handlers(app)
