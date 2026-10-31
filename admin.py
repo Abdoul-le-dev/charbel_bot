@@ -335,6 +335,7 @@ async def cmd_aide(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "/envoyer — diffuser un message à une cible\n"
         "/export — exporter un tableau Excel (tu choisis la cible)\n"
         "/dates — voir ou changer les dates du webinaire\n"
+        "/rattacher JJ/MM/AAAA — rattacher à la session actuelle ceux inscrits depuis cette date\n"
         "/stats — statistiques\n"
         "/nouvelle_categorie <nom>")
 
@@ -415,13 +416,7 @@ async def cmd_dates(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     saisie = ctx.args[0]
-    mercredi = None
-    for fmt in ("%d/%m/%Y", "%Y-%m-%d", "%d-%m-%Y"):
-        try:
-            mercredi = datetime.strptime(saisie, fmt).date()
-            break
-        except ValueError:
-            pass
+    mercredi = _lire_date(saisie)
     if not mercredi:
         await update.message.reply_text("❌ Date illisible. Exemple : /dates 11/11/2026")
         return
@@ -456,6 +451,60 @@ async def cmd_dates(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         f"📌 {ajoutes} rappels planifiés pour ces soirs. Vérifie-les avec /rappels."
         "\n\n"
         "N'oublie pas les codes des soirs : /codes 1 ... et /codes 2 ...")
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# COMMANDE ADMIN — /rattacher : inscrits enregistrés sous une ancienne session → session actuelle
+#   /rattacher 29/10/2026        → aperçu (combien, qui, depuis quelle session)
+#   /rattacher 29/10/2026 oui    → applique (réponses et choix des soirs conservés)
+# ════════════════════════════════════════════════════════════════════════════
+
+def _lire_date(saisie):
+    for fmt in ("%d/%m/%Y", "%Y-%m-%d", "%d-%m-%Y"):
+        try:
+            return datetime.strptime(saisie, fmt).date()
+        except ValueError:
+            pass
+    return None
+
+
+@admin_seulement
+async def cmd_rattacher(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    depuis = _lire_date(ctx.args[0]) if ctx.args else None
+    if not depuis:
+        await update.message.reply_text(
+            "Usage : /rattacher JJ/MM/AAAA\nEx : /rattacher 29/10/2026\n\n"
+            "Rattache à la session actuelle toutes les personnes qui ont terminé leur inscription "
+            "depuis cette date, mais sont enregistrées sous une ancienne session.")
+        return
+
+    session = webinaire()
+    personnes = db.users_a_rattacher(session, f"{depuis.isoformat()} 00:00:00")
+    if not personnes:
+        await update.message.reply_text(f"✅ Personne à rattacher : tous les inscrits depuis le "
+                                        f"{nom_date(depuis)} sont déjà dans la session actuelle.")
+        return
+
+    if ctx.args[1:] != ["oui"]:
+        par_session = Counter(p["webinaire"] or "(vide)" for p in personnes)
+        detail = "\n".join(f"  • session {s} : {n}" for s, n in par_session.items())
+        exemples = "\n".join(f"  • {p['prenom'] or '(sans prénom)'} — inscrit le {p['updated_at'][:16]}"
+                              for p in personnes[:10])
+        suite = f"\n  … et {len(personnes) - 10} autres" if len(personnes) > 10 else ""
+        await update.message.reply_text(
+            f"🔎 {len(personnes)} personnes ont terminé leur inscription depuis le {nom_date(depuis)} "
+            f"mais ne sont pas rattachées à la session actuelle ({JOURS[1]['nom']} / {JOURS[2]['nom']}).\n\n"
+            f"Elles sont enregistrées sous :\n{detail}\n\n"
+            f"Exemples :\n{exemples}{suite}\n\n"
+            "Après rattachement, elles seront comptées comme confirmées et recevront les rappels. "
+            "Leurs réponses et leur choix de soir(s) sont conservés.\n\n"
+            f"Pour valider : /rattacher {ctx.args[0]} oui")
+        return
+
+    db.rattacher_users([p["telegram_id"] for p in personnes], session)
+    await update.message.reply_text(
+        f"✅ {len(personnes)} personnes rattachées à la session du {JOURS[1]['nom']} / {JOURS[2]['nom']}.\n\n"
+        f"Confirmés au total : {len(db.ids_confirmes(session))}. Vérifie avec /stats.")
 
 
 # ════════════════════════════════════════════════════════════════════════════

@@ -372,6 +372,25 @@ def ids_confirmes(webinaire, jour=None, champ=None, valeur=None) -> list[int]:
         return [r[0] for r in conn.execute(sql, params)]
 
 
+def users_a_rattacher(webinaire, depuis: str) -> list[dict]:
+    """Personnes ayant TERMINÉ l'inscription à partir de `depuis`, mais rattachées à une autre session
+    (ex : inscrites avec l'ancien code, qui les enregistrait sous le webinaire de septembre)."""
+    with connexion() as conn:
+        rows = conn.execute(
+            """SELECT telegram_id, prenom, webinaire, presence, updated_at FROM users
+               WHERE completed = 1 AND (webinaire IS NULL OR webinaire != ?) AND updated_at >= ?
+               ORDER BY updated_at""", (webinaire, depuis)).fetchall()
+    return [dict(r) for r in rows]
+
+
+def rattacher_users(ids, webinaire):
+    """Rattache ces personnes à la session `webinaire`, en gardant toutes leurs réponses
+    (y compris le choix des soirs). updated_at n'est pas modifié (sert aux stats de complétion)."""
+    with connexion() as conn:
+        conn.executemany("UPDATE users SET webinaire = ? WHERE telegram_id = ?",
+                         [(webinaire, uid) for uid in ids])
+
+
 def ids_septembre() -> list[int]:
     """Anciens confirmés (webinaire de septembre : colonne webinaire vide)."""
     with connexion() as conn:

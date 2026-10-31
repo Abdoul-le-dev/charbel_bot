@@ -1,567 +1,74 @@
-import os
-import asyncio
-import sqlite3
-from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardRemove
+from dotenv import load_dotenv
+
+load_dotenv()      # DOIT rester avant l'import de client (qui lit TOKEN dès son chargement)
+
+from telegram import Update
 from telegram.ext import (
-    ChatJoinRequestHandler, CallbackQueryHandler, Application,
-    CommandHandler, MessageHandler, filters, ContextTypes, ConversationHandler
+    Application, CallbackQueryHandler, ChatJoinRequestHandler, CommandHandler,
+    ConversationHandler, MessageHandler, filters,
 )
-from database.database import init_db, upsert_user, log_member, get_file_id, save_file_id
 
-TOKEN = ""
-
-ADMIN_IDS = {6992809421, 6799962131}
-
-# ── Étapes inscription ───────────────────────────────────────────────────────
-PRENOM, LEVEL, OBJECTIF, WHATSAPP, EMAIL, CONFIRMATION = range(6)
-
-# ── Étapes broadcast ─────────────────────────────────────────────────────────
-BC_FORMAT, BC_MEDIA, BC_TEXT = range(6, 9)
-
-PLACES_RESTANTES = 47
-PLACES_TOTALES = 150
-
-
-# ── Helpers base ──────────────────────────────────────────────────────────────
-
-def _is_already_registered(user_id: int) -> bool:
-    """Retourne True si l'utilisateur a déjà complété toute l'inscription."""
-    conn = sqlite3.connect("preinscriptions.db")
-    cursor = conn.cursor()
-    cursor.execute(
-        """SELECT completed FROM users
-           WHERE telegram_id = ?
-             AND prenom    IS NOT NULL
-             AND level     IS NOT NULL
-             AND objectif  IS NOT NULL
-             AND whatsapp  IS NOT NULL
-             AND email     IS NOT NULL
-             AND completed = 1""",
-        (user_id,)
-    )
-    row = cursor.fetchone()
-    conn.close()
-    return row is not None
-
-
-def _get_all_user_ids() -> list[int]:
-    conn = sqlite3.connect("preinscriptions.db")
-    cursor = conn.cursor()
-    cursor.execute("SELECT telegram_id FROM users WHERE telegram_id IS NOT NULL")
-    rows = cursor.fetchall()
-    conn.close()
-    return [row[0] for row in rows]
-
-
-# ── Keyboards inscription ─────────────────────────────────────────────────────
-
-def kb_level():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("1️⃣ Je n'ai jamais tradé", callback_data="level_1")],
-        [InlineKeyboardButton("2️⃣ J'ai débuté mais sans résultats", callback_data="level_2")],
-        [InlineKeyboardButton("3️⃣ Je trade avec des résultats irréguliers", callback_data="level_3")],
-        [InlineKeyboardButton("4️⃣ Je suis déjà rentable", callback_data="level_4")],
-    ])
-
-def kb_objectif():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📚 Apprendre une méthode simple et rapide", callback_data="obj_methode")],
-        [InlineKeyboardButton("🎥 Voir une démonstration en direct", callback_data="obj_demo")],
-        [InlineKeyboardButton("💪 Gagner en confiance", callback_data="obj_confiance")],
-        [InlineKeyboardButton("✍️ Autre", callback_data="obj_autre")],
-    ])
-
-def kb_confirmation():
-    return InlineKeyboardMarkup([[
-        InlineKeyboardButton("🚀 Confirmer mon inscription !", callback_data="confirme")
-    ]])
-
-
-# ── Envoi vidéo de bienvenue ─────────────────────────────────────────────────
-
-async def send_welcome_video(bot, user_id: int):
-    log_member(user_id)
-
-    video_name = "welcomes_2"
-    file_id = get_file_id(video_name)
-
-    caption = (
-        "🚀 *Bienvenue !*\n\n"
-        "Tu es sur le point de réserver ta place à la masterclass gratuite :\n"
-        "*« Capturer les meilleures impulsions d'une tendance en 5 minutes »*\n\n"
-    )
-
-    if file_id:
-        await bot.send_video(
-            chat_id=user_id,
-            video=file_id,
-            caption=caption,
-            parse_mode="Markdown",
-        )
-    else:
-        video_path = "video/welcome.mp4"
-        msg = await bot.send_video(
-            chat_id=user_id,
-            video=open(video_path, "rb"),
-            caption=caption,
-            parse_mode="Markdown",
-        )
-        save_file_id(video_name, msg.video.file_id)
-
-    await bot.send_message(
-        chat_id=user_id,
-        text=(
-        
-            f"⚠️ *Il ne reste que {PLACES_RESTANTES} places sur {PLACES_TOTALES} !*\n"
-            f"Les places s'envolent vite. Sécurise la tienne maintenant avant qu'il ne soit trop tard.\n\n"
-            "👇 Clique ici pour réserver ta place :\n\n"
-            "/JeMEnregistre"
-        ),
-        parse_mode="Markdown"
-    )
-
-
-async def _send_welcome_safe(bot, user_id: int):
-    try:
-       # await send_welcome_video(bot, user_id)
-       print('yes')
-    except Exception as e:
-        print(f"Erreur envoi message à {user_id} : {e}")
-
-
-# ── Message "déjà inscrit" ────────────────────────────────────────────────────
-
-async def _reply_already_registered(target):
-    """
-    target peut être un Update (commande) ou directement un bot+user_id
-    (pour approve_join_request).
-    On unifie en passant toujours (bot, chat_id).
-    """
-    bot, chat_id = target
-    await bot.send_message(
-        chat_id=chat_id,
-        text=(
-            "✅ *Tu es déjà inscrit(e) à la masterclass !*\n\n"
-            "Pas besoin de t'enregistrer une deuxième fois 😊\n\n"
-            "📲 Tu recevras le lien du live et tous les rappels "
-            "par *WhatsApp et Telegram* avant l'événement.\n\n"
-            "Hâte de te voir en ligne ! 🔥"
-        ),
-        parse_mode="Markdown"
-    )
-
-
-# ── Approbation demande d'adhésion ───────────────────────────────────────────
-
-async def _handle_join(bot, user_id: int):
-    try:
-        if _is_already_registered(user_id):
-            await _reply_already_registered((bot, user_id))
-        else:
-            await send_welcome_video(bot, user_id)
-    except Exception as e:
-        print(f"Erreur envoi message à {user_id} : {e}")
-
-
-async def approve_join_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.chat_join_request.from_user.id
-    await update.chat_join_request.approve()
-    asyncio.create_task(_handle_join(context.bot, user_id))
-
-
-# ── Commande /start ───────────────────────────────────────────────────────────
-
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    if _is_already_registered(user_id):
-        await _reply_already_registered((context.bot, user_id))
-        return
-    asyncio.create_task(_send_welcome_safe(context.bot, user_id))
-
-
-# ════════════════════════════════════════════════════════════════════════════
-# ── BROADCAST — /envoyer ─────────────────────────────────════════════════════
-# ════════════════════════════════════════════════════════════════════════════
-
-async def _broadcast_all(bot, admin_id: int, data: dict):
-    user_ids = _get_all_user_ids()
-    total    = len(user_ids)
-    fmt      = data.get("format")
-    texte    = data.get("text_content", "")
-    media_id = data.get("media_file_id")
-
-    if total == 0:
-        await bot.send_message(admin_id, "❌ Aucun utilisateur enregistré.")
-        return
-
-    if fmt in {"2", "3", "4", "5"} and not media_id:
-        await bot.send_message(admin_id, "❌ Fichier média manquant. Diffusion annulée.")
-        return
-
-    est = round(total * 0.1 / 60, 2)
-    await bot.send_message(
-        admin_id,
-        f"📤 Envoi en cours à *{total}* utilisateurs…\n⏳ Estimé : {est} min",
-        parse_mode="Markdown"
-    )
-
-    sent = 0
-    for idx, uid in enumerate(user_ids, start=1):
-        try:
-            if fmt == "1":
-                await bot.send_message(chat_id=uid, text=texte)
-            elif fmt == "2":
-                await bot.send_photo(chat_id=uid, photo=media_id, caption=texte)
-            elif fmt == "3":
-                await bot.send_video(chat_id=uid, video=media_id, caption=texte)
-            elif fmt == "4":
-                await bot.send_photo(chat_id=uid, photo=media_id)
-            elif fmt == "5":
-                await bot.send_video(chat_id=uid, video=media_id)
-            sent += 1
-        except Exception as e:
-            print(f"Erreur envoi uid={uid} : {e}")
-
-        if idx == total // 3:
-            await bot.send_message(admin_id, "✅ 1/3 des messages envoyés")
-        elif idx == (2 * total) // 3:
-            await bot.send_message(admin_id, "✅ 2/3 des messages envoyés")
-        elif idx == total:
-            await bot.send_message(admin_id, f"🎉 Diffusion terminée — *{sent}/{total}* messages envoyés", parse_mode="Markdown")
-
-        await asyncio.sleep(0.1)
-
-
-async def bc_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id not in ADMIN_IDS:
-        await update.message.reply_text("⛔ Commande réservée à l'administrateur.")
-        return ConversationHandler.END
-
-    await update.message.reply_text(
-        "📤 *Choisis le format du message à diffuser* :\n\n"
-        "1 — Texte seul\n"
-        "2 — Image + texte\n"
-        "3 — Vidéo + texte\n"
-        "4 — Image seule\n"
-        "5 — Vidéo seule\n\n"
-        "_(max 4096 caractères pour le texte)_",
-        parse_mode="Markdown",
-        reply_markup=ReplyKeyboardRemove()
-    )
-    return BC_FORMAT
-
-
-async def bc_get_format(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    choix = update.message.text.strip()[0]
-    if choix not in {"1", "2", "3", "4", "5"}:
-        await update.message.reply_text("❌ Choix invalide. Envoie un chiffre entre 1 et 5.")
-        return BC_FORMAT
-
-    context.user_data["bc_format"] = choix
-
-    if choix in {"2", "3"}:
-        type_media = "image" if choix == "2" else "vidéo"
-        await update.message.reply_text(f"📁 Envoie maintenant ton fichier {type_media}.")
-        return BC_MEDIA
-
-    if choix == "1":
-        await update.message.reply_text("✏️ Envoie maintenant ton texte.")
-    else:
-        await update.message.reply_text("📁 Envoie maintenant ton fichier (image ou vidéo).")
-    return BC_TEXT
-
-
-async def bc_get_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    choix = context.user_data["bc_format"]
-
-    if choix == "2":
-        if not update.message.photo:
-            await update.message.reply_text("❌ Ce n'est pas une image. Réessaie.")
-            return BC_MEDIA
-        context.user_data["bc_media_id"] = update.message.photo[-1].file_id
-
-    elif choix == "3":
-        if not update.message.video:
-            await update.message.reply_text("❌ Ce n'est pas une vidéo. Réessaie.")
-            return BC_MEDIA
-        context.user_data["bc_media_id"] = update.message.video.file_id
-
-    await update.message.reply_text("✏️ Envoie maintenant le texte associé.")
-    return BC_TEXT
-
-
-async def bc_get_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    admin_id = update.effective_user.id
-    choix    = context.user_data["bc_format"]
-
-    if choix == "4":
-        if not update.message.photo:
-            await update.message.reply_text("❌ Ce n'est pas une image. Réessaie.")
-            return BC_TEXT
-        context.user_data["bc_media_id"] = update.message.photo[-1].file_id
-        context.user_data["bc_text"]     = ""
-
-    elif choix == "5":
-        if not update.message.video:
-            await update.message.reply_text("❌ Ce n'est pas une vidéo. Réessaie.")
-            return BC_TEXT
-        context.user_data["bc_media_id"] = update.message.video.file_id
-        context.user_data["bc_text"]     = ""
-
-    else:
-        if not update.message.text:
-            await update.message.reply_text("❌ Merci d'envoyer du texte.")
-            return BC_TEXT
-        context.user_data["bc_text"] = update.message.text
-
-    await update.message.reply_text("✅ Message reçu ! Diffusion lancée en arrière-plan…")
-
-    asyncio.create_task(_broadcast_all(
-        context.bot,
-        admin_id,
-        {
-            "format":        choix,
-            "text_content":  context.user_data.get("bc_text", ""),
-            "media_file_id": context.user_data.get("bc_media_id"),
-        }
+from database import database as db
+from sondage import init_sondage_db, register_sondage_handlers   # module sondage : inchangé
+
+from client import (
+    TOKEN, approuver_demande, boutons, cmd_inscription, cmd_start, message_libre,
+)
+from admin import (
+    CHOIX_CIBLE, RECEVOIR_MESSAGE,
+    annuler, choisir_cible, cmd_aide, cmd_categorie, cmd_codes, cmd_dates, cmd_envoyer, cmd_rattacher,
+    cmd_envoyer_rappel, cmd_export, cmd_modifier, cmd_rappels, cmd_stats,
+    cmd_tester_rappel, demarrer_planificateur, error_handler, planifier_rappels, recevoir_message,
+)
+
+
+def main():
+    if not TOKEN:
+        raise SystemExit("❌ Définis TOKEN dans le fichier .env ou en variable d'environnement "
+                         "(token régénéré via @BotFather).")
+
+    db.init_db()
+    planifier_rappels()          # ajoute les rappels des dates actuelles qui manquent (jamais de doublon)
+    init_sondage_db()
+
+    app = (Application.builder().token(TOKEN).read_timeout(30).write_timeout(30)
+           .post_init(demarrer_planificateur).build())
+
+    # ── Côté client
+    app.add_handler(ChatJoinRequestHandler(approuver_demande))
+    app.add_handler(CommandHandler("start", cmd_start))
+    app.add_handler(CommandHandler("JeMEnregistre", cmd_inscription))
+
+    # ── Côté admin
+    for nom, fonction in [("aide", cmd_aide), ("stats", cmd_stats), ("rappels", cmd_rappels),
+                          ("modifier", cmd_modifier), ("tester_rappel", cmd_tester_rappel),
+                          ("envoyer_rappel", cmd_envoyer_rappel), ("codes", cmd_codes),
+                          ("dates", cmd_dates), ("rattacher", cmd_rattacher),
+                          ("nouvelle_categorie", cmd_categorie)]:
+        app.add_handler(CommandHandler(nom, fonction))
+
+    app.add_handler(ConversationHandler(
+        entry_points=[CommandHandler("envoyer", cmd_envoyer), CommandHandler("export", cmd_export)],
+        states={
+            CHOIX_CIBLE: [MessageHandler(filters.TEXT & ~filters.COMMAND, choisir_cible)],
+            RECEVOIR_MESSAGE: [MessageHandler(filters.ALL & ~filters.COMMAND, recevoir_message)],
+        },
+        fallbacks=[CommandHandler("cancel", annuler)],
+        per_chat=False, per_user=True, allow_reentry=True,
     ))
-    return ConversationHandler.END
 
+    # ── Boutons, erreurs, sondage
+    app.add_handler(CallbackQueryHandler(boutons, pattern=r"^(q|prenom|live|demarrer|souci)(:|$)"))
+    app.add_error_handler(error_handler)
 
-async def bc_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("❌ Diffusion annulée.")
-    return ConversationHandler.END
+    register_sondage_handlers(app)
 
-
-# ── /stats ────────────────────────────────────────────────────────────────────
-
-async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id not in ADMIN_IDS:
-        await update.message.reply_text("⛔ Commande réservée à l'administrateur.")
-        return
-
-    conn = sqlite3.connect("preinscriptions.db")
-    cursor = conn.cursor()
-
-    cursor.execute("SELECT COUNT(*) FROM users")
-    total = cursor.fetchone()[0]
-
-    cursor.execute("SELECT COUNT(*) FROM users WHERE completed = 1")
-    complets = cursor.fetchone()[0]
-
-    # Nombre de personnes dans la table members (ceux qui ont rejoint le canal)
-    try:
-        cursor.execute("SELECT COUNT(*) FROM members")
-        members = cursor.fetchone()[0]
-    except Exception:
-        members = "table introuvable"
-
-    conn.close()
-
-    await update.message.reply_text(
-        f"📊 *Statistiques :*\n\n"
-        f"👁 Membres ayant rejoint le canal : *{members}*\n\n"
-        f"👥 Utilisateurs ayant démarré le formulaire : *{total}*\n"
-        f"✅ Inscriptions complètes : *{complets}*\n"
-        f"⏳ Inscriptions en cours : *{total - complets}*\n\n"
-        f"🎯 Places réservées : *{complets}/{PLACES_TOTALES}*\n"
-        f"🔥 Places restantes : *{PLACES_TOTALES - complets}*",
-        parse_mode="Markdown"
-    )
-
-
-# ── Conversation : /JeMEnregistre ────────────────────────────────────────────
-
-async def je_me_enregistre(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-
-    # Vérification avant de lancer le formulaire
-    if _is_already_registered(user_id):
-        await _reply_already_registered((context.bot, user_id))
-        return ConversationHandler.END
-
-    await update.message.reply_text(
-        "Super ! 🎉\n\n"
-        "Moi c'est Charbel Yayi 👋 "
-        "et toi ?\n\n",
-        parse_mode="Markdown"
-    )
-    return PRENOM
-
-
-async def get_prenom(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.message.from_user.id
-    prenom  = update.message.text.strip()
-    context.user_data["prenom"] = prenom
-    upsert_user(user_id, prenom=prenom)
-
-    await update.message.reply_text(
-        f"Enchanté *{prenom}* ! 👋\n\n"
-        "📊 *Quelle est ton expérience actuelle en trading ?*",
-        parse_mode="Markdown",
-        reply_markup=kb_level()
-    )
-    return LEVEL
-
-
-async def get_level(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    user_id = query.from_user.id
-
-    level_map = {
-        "level_1": "Je n'ai jamais tradé",
-        "level_2": "J'ai débuté mais sans résultats",
-        "level_3": "Je trade avec des résultats irréguliers",
-        "level_4": "Je suis déjà rentable",
-    }
-    level = level_map.get(query.data, "Non précisé")
-    context.user_data["level"] = level
-    upsert_user(user_id, level=level)
-
-    await query.message.reply_text(
-        "🎯 *Quel est ton principal objectif en rejoignant cette masterclass ?*",
-        parse_mode="Markdown",
-        reply_markup=kb_objectif()
-    )
-    return OBJECTIF
-
-
-async def get_objectif(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    user_id = query.from_user.id
-
-    obj_map = {
-        "obj_methode":   "Apprendre une méthode simple et rapide",
-        "obj_demo":      "Voir une démonstration en direct",
-        "obj_confiance": "Gagner en confiance",
-        "obj_autre":     "Autre",
-    }
-    objectif = obj_map.get(query.data, "Non précisé")
-    context.user_data["objectif"] = objectif
-    upsert_user(user_id, objectif=objectif)
-
-    await query.message.reply_text(
-        "📱 *Quel est ton numéro WhatsApp ?*\n"
-        "Je t'enverrai les rappels pour la masterclass afin que tu sois avec nous 😊\n\n"
-        "_(Ex : +229 60619292)_",
-        parse_mode="Markdown"
-    )
-    return WHATSAPP
-
-
-async def get_whatsapp(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id  = update.message.from_user.id
-    whatsapp = update.message.text.strip()
-    context.user_data["whatsapp"] = whatsapp
-    upsert_user(user_id, whatsapp=whatsapp)
-
-    await update.message.reply_text(
-        "📧 *Laisse-moi aussi ton adresse mail :*\n\n",
-        parse_mode="Markdown"
-    )
-    return EMAIL
-
-
-async def get_email(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.message.from_user.id
-    email   = update.message.text.strip()
-    context.user_data["email"] = email
-    upsert_user(user_id, email=email)
-
-    prenom   = context.user_data.get("prenom", "")
-    level    = context.user_data.get("level", "")
-    objectif = context.user_data.get("objectif", "")
-    whatsapp = context.user_data.get("whatsapp", "")
-
-    await update.message.reply_text(
-        f"✅ *Récapitulatif de ton inscription :*\n\n"
-        f"👤 Prénom : *{prenom}*\n"
-        f"📊 Niveau : *{level}*\n"
-        f"🎯 Objectif : *{objectif}*\n"
-        f"📱 WhatsApp : *{whatsapp}*\n"
-        f"📧 Email : *{email}*\n\n"
-        "En confirmant, tu acceptes de recevoir les rappels par WhatsApp et Telegram.\n"
-        "Tu peux te désinscrire à tout moment.\n\n"
-        "👇",
-        parse_mode="Markdown",
-        reply_markup=kb_confirmation()
-    )
-    return CONFIRMATION
-
-
-async def confirmer_inscription(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query   = update.callback_query
-    await query.answer()
-    user_id = query.from_user.id
-    prenom  = context.user_data.get("prenom", "")
-    upsert_user(user_id, completed=1)
-
-    await query.message.reply_text(
-        f"🎉 *Félicitations {prenom} !*\n\n"
-        "Tu es officiellement inscrit(e) à la masterclass gratuite :\n"
-        "*« Capturer les meilleures impulsions d'une tendance en 5 minutes »*\n\n"
-        "📲 Tu recevras le lien du live et les rappels par *WhatsApp et Telegram*.\n\n"
-        "Hâte de te voir en ligne ! 🔥",
-        parse_mode="Markdown"
-    )
-    return ConversationHandler.END
-
-
-async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Inscription annulée. Tape /JeMEnregistre pour recommencer.")
-    return ConversationHandler.END
-
-
-# ── Main ──────────────────────────────────────────────────────────────────────
-
-if __name__ == "__main__":
-    init_db()
-
-    app = (
-        Application.builder()
-        .token(TOKEN)
-        .read_timeout(30)
-        .write_timeout(30)
-        .build()
-    )
-
-    app.add_handler(ChatJoinRequestHandler(approve_join_request))
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("stats", stats))
-
-    conv_inscription = ConversationHandler(
-        entry_points=[CommandHandler("JeMEnregistre", je_me_enregistre)],
-        states={
-            PRENOM:       [MessageHandler(filters.TEXT & ~filters.COMMAND, get_prenom)],
-            LEVEL:        [CallbackQueryHandler(get_level,    pattern="^level_")],
-            OBJECTIF:     [CallbackQueryHandler(get_objectif, pattern="^obj_")],
-            WHATSAPP:     [MessageHandler(filters.TEXT & ~filters.COMMAND, get_whatsapp)],
-            EMAIL:        [MessageHandler(filters.TEXT & ~filters.COMMAND, get_email)],
-            CONFIRMATION: [CallbackQueryHandler(confirmer_inscription, pattern="^confirme$")],
-        },
-        fallbacks=[CommandHandler("cancel", cancel)],
-        per_chat=False,
-        per_user=True,
-        allow_reentry=True,
-    )
-
-    conv_broadcast = ConversationHandler(
-        entry_points=[CommandHandler("envoyer", bc_start)],
-        states={
-            BC_FORMAT: [MessageHandler(filters.TEXT & ~filters.COMMAND, bc_get_format)],
-            BC_MEDIA:  [MessageHandler(filters.PHOTO | filters.VIDEO,   bc_get_media)],
-            BC_TEXT:   [MessageHandler(filters.TEXT | filters.PHOTO | filters.VIDEO, bc_get_text)],
-        },
-        fallbacks=[CommandHandler("cancel", bc_cancel)],
-        per_chat=False,
-        per_user=True,
-        allow_reentry=True,
-    )
-
-    app.add_handler(conv_inscription)
-    app.add_handler(conv_broadcast)
+    # En dernier : capte tout texte hors commande (codes du soir, questionnaire, messages libres)
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_libre))
 
     print("start...")
     app.run_polling(poll_interval=1, allowed_updates=Update.ALL_TYPES)
+
+
+if __name__ == "__main__":
+    main()
